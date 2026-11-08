@@ -36,6 +36,14 @@ cache/
 # ---- 本地环境配置（含本机绝对路径） ----
 config/env_config.yaml
 
+# ---- 本地保留、暂不上传的模块 ----
+# 荧光寿命模块已并入「单点脉冲实验」，源码暂不公开
+src/interface/lifetime.py
+src/threads/lifetime_threads/
+src/threads/lifetime_scan_threads/
+ui/uipy/Lifetime/
+ui/ui_files/Lifetime/
+
 # ---- 系统 ----
 Thumbs.db
 .DS_Store

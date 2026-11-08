@@ -16,7 +16,7 @@
 | 图像处理 | `src/interface/scan_image_deal.py` | 扫描图像后处理与显示 |
 | 脉冲序列 | `src/interface/sequence.py` | 载入 `config/PulseSeq/*` 波形，驱动 Pulse Streamer |
 | 单点脉冲 ESR | `src/interface/single_point_exp.py` | 脉冲 ODMR 单点测量 |
-| 荧光寿命 | `src/interface/lifetime.py` | 寿命扫描、拟合与频率列表 |
+| 荧光寿命 | — | 功能已并入「单点脉冲实验」，源码暂未公开 |
 | 自动跟踪 | `src/interface/track.py` | 长时间测量的位置跟踪与补偿 |
 | 数据拟合 | `src/fitting_method/` | 寿命拟合、正弦（Rabi/Ramsey）拟合 |
 
@@ -89,6 +89,10 @@ python main.py
 - 本项目面向实验室内部仪器环境，`src/hardware/__init__.py` 中默认写入了本机设备的序列号
   （Pulse Streamer / Time Tagger），在其它机器上使用时请修改为自己的设备序列号。
 - 日志写入 `logs/`，运行缓存写入 `cache/`，二者均不纳入版本控制。
+- **荧光寿命模块未包含在本仓库中**：相关源码（`src/interface/lifetime.py`、
+  `src/threads/lifetime_threads/`、`src/threads/lifetime_scan_threads/`、
+  `ui/uipy/Lifetime/`、`ui/ui_files/Lifetime/`）属于实验室内部代码，暂不公开；
+  其功能已并入「单点脉冲实验」。缺失时光寿命入口会自动置灰，程序其余部分不受影响。
 
 ## License
 

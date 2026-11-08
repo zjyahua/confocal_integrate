@@ -10,7 +10,11 @@ from PyQt5 import QtWidgets, QtCore
 from src.interface.confocal_scan import mainGUI as Confocal_interface
 from src.interface.track import mainGUI as Track_interface
 from src.interface.sequence import mainGUI as Sequence_interface
-from src.interface.lifetime import mainGUI as lifetime_interface
+try:
+    # 荧光寿命模块：本地保留，暂不包含在公开仓库中（功能已并入单点脉冲实验）
+    from src.interface.lifetime import mainGUI as lifetime_interface
+except ImportError:
+    lifetime_interface = None
 from src.interface.scan_image_deal import mainGUI as scan_image_process_interface
 from src.interface.single_point_exp import mainGUI as Single_point_exp_interface
 from src.hardware import DeviceManager
@@ -39,7 +43,11 @@ class mainGUI(QtWidgets.QMainWindow):
         self.ui.pbExpConfocal.clicked.connect(self.open_confocal_interface)
         self.ui.pbExpTrack.clicked.connect(self.open_track_interface)
         self.ui.pbExpSequence.clicked.connect(self.open_sequence_interface)
-        self.ui.pbExpLifetime.clicked.connect(self.open_lifetime_interface)
+        if lifetime_interface is None:
+            self.ui.pbExpLifetime.setEnabled(False)
+            self.ui.pbExpLifetime.setToolTip('本版本未包含荧光寿命模块（功能已并入单点脉冲实验）')
+        else:
+            self.ui.pbExpLifetime.clicked.connect(self.open_lifetime_interface)
         self.ui.pbExpTimePulse.clicked.connect(self.open_single_point_exp_interface)
         # data process interface group
         self.ui.pbDP_confocal.clicked.connect(self.open_data_process_scan_image_interface)
@@ -149,6 +157,9 @@ class mainGUI(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot()
     def open_lifetime_interface(self):
+        if lifetime_interface is None:
+            self.ui.statusbar.showMessage('本版本未包含荧光寿命模块，请使用单点脉冲实验。', msecs=3000)
+            return
         if self.lifetime_interface is None:
             self.lifetime_interface = lifetime_interface(hardware=self.hardware, track_interface=self.Track_interface)
             self.lifetime_interface.ExpLifetimeClose.connect(self.lifetime_interface_closed)
