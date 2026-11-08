@@ -6,6 +6,8 @@
 > An integrated PyQt5 control suite for confocal microscopy, pulsed ODMR and
 > lifetime measurements on NV centers.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ## 功能
 
 | 模块 | 文件 | 说明 |
@@ -90,4 +92,6 @@ python main.py
 
 ## License
 
-内部科研使用；如需对外分发请先补充许可证文件（例如 MIT）。
+本项目采用 [MIT License](LICENSE) 发布，可自由使用、修改与分发，仅需保留版权声明。
+
+Copyright (c) 2026 zjyahua
