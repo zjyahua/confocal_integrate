@@ -1,0 +1,8 @@
+Scan_Time_Parameters:
+  bin_width_ps: 100
+  bin_number: 1000
+Exp_Parameters:
+  Total_loop: 100
+  Total_average: 10000
+Freq_Parameter:
+  Freq_kHz: 1000

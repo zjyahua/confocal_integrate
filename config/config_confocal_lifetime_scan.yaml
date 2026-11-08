@@ -1,0 +1,21 @@
+move:
+  piezo_step: 0.05
+piezo_scan:
+  cursor:
+    x: 0.0
+    y: 0.0
+    z: 10.0
+  pixel_time: 0.8
+  range: 0.5
+  x:
+    end: 1.0
+    start: -1.0
+    step: 0.02
+  y:
+    end: 1.0
+    start: -1.0
+    step: 0.02
+time_parameter:
+  Freq_kHz: 100
+  bin_number: 400
+  bin_width_ps: 25000

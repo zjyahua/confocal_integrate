@@ -1,0 +1,42 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# ---- 运行时产物 ----
+logs/
+cache/
+*.log
+*.tmp
+
+# ---- 实验数据 / 图像输出（按需保留） ----
+*.h5
+*.hdf5
+*.mat
+*.npy
+*.npz
+*.png
+*.jpg
+*.csv
+*.dat
+
+# ---- 本地环境配置（含本机绝对路径） ----
+config/env_config.yaml
+
+# ---- 系统 ----
+Thumbs.db
+.DS_Store
+desktop.ini

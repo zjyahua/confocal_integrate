@@ -1,0 +1,4 @@
+Count:
+  integral_time: 1000
+move:
+  piezo_step: 0.05

@@ -1,0 +1,16 @@
+Exp_configration:
+  total_average: 1000000
+  total_loop: 1000
+MW:
+  current_freq: 2870
+  end_freq: 2940
+  power: -15
+  start_freq: 2800
+  step_freq: 1
+Time_histogram:
+  bin_number: 1000
+  bin_width_ps: 100
+Time_pulse:
+  end_time: 1000
+  start_time: 0
+  time_num: 100

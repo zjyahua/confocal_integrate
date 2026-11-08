@@ -1,0 +1,20 @@
+move:
+  piezo_step: 0.05
+piezo_scan:
+  cursor:
+    x: 100.0
+    y: 100.0
+    z: 100.0
+  range: 20.0
+  x:
+    end: 200.0
+    start: 0.0
+    step: 2.0
+  y:
+    end: 200.0
+    start: 0.0
+    step: 2.0
+  z:
+    end: 200.0
+    start: 0.0
+    step: 2.0
