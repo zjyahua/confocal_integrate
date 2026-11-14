@@ -130,21 +130,19 @@ class DataThread(QtCore.QObject):
         ny = len(self.yArr)
         expected_size = nx * ny
 
-        if counts.size == expected_size:
-            # Counter returns full image data
-            self.map = counts.reshape(ny, nx)
-            line_counts = self.map[line_index, :]
-
-        elif counts.size >= nx:
-            # Counter returns one line data
-            line_counts = counts[:nx]
-            self.map[line_index, :] = line_counts
-
-        else:
+        # Never fall back to counts[:nx]. That branch silently copies the first
+        # line into every row whenever the scan line count differs from the image
+        # row count, which produces a plausible looking but wrong image.
+        if counts.size != expected_size:
             raise ValueError(
                 f"Galvo counts length mismatch: got {counts.size}, "
-                f"expected {nx} or {expected_size}"
+                f"expected {expected_size} ({ny} rows x {nx} columns). "
+                f"Scan axis and image axis must use the same resolution."
             )
+
+        # Counter returns the whole frame: cumulative gates for every pixel.
+        self.map = counts.reshape(ny, nx)
+        line_counts = self.map[line_index, :]
 
         self.append_raw_intensity(
             x_values=self.xArr,

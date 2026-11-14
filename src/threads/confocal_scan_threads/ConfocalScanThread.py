@@ -174,7 +174,21 @@ class ConfocalScanThread(QtCore.QThread):
         if second_step == 0:
             raise ValueError("Second axis step cannot be zero.")
 
-        second_axis = np.arange(second_start, second_end, second_step, dtype=float)
+        resolution = int(self.resolution)
+
+        if resolution <= 0:
+            raise ValueError("Resolution must be positive.")
+
+        # Use exactly the same definition as the image axis in DataThread
+        # (confocal_scan.configure_data_thread_before_scan: np.linspace(..., endpoint=False)).
+        # np.arange would return ceil((end - start) / step) points, which can be
+        # resolution + 1 depending on floating point rounding of the coordinates.
+        second_axis = np.linspace(
+            second_start,
+            second_end,
+            resolution,
+            endpoint=False,
+        )
 
         return x_start, x_end, x_step, second_axis, fixed_axis_pos
 
@@ -373,6 +387,7 @@ class ConfocalScanThread(QtCore.QThread):
                     break
 
                 self._move_second_axis(second_pos)
+                print(second_pos)
 
                 try:
                     if i == 1:
