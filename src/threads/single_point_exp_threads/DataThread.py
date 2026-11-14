@@ -153,12 +153,13 @@ class DataThread(QtCore.QObject):
 
         self.histogram_loop_valid = np.zeros(loop_num, dtype=bool)
 
-        if self.time_sweep_arr is not None and len(self.time_sweep_arr) == bin_num:
-            self.histogram_time_axis = np.asarray(self.time_sweep_arr, dtype=float)
-        else:
-            # bin_width is assumed to be ps, convert to ns
-            bin_width_ns = self.bin_width / 1000.0
-            self.histogram_time_axis = np.arange(1, bin_num + 1) * bin_width_ns
+        # The histogram x axis comes from the binning itself, never from the
+        # time-scan sweep: their lengths can coincide by accident (e.g. 100 bins
+        # and 100 time-scan points), which silently relabels the axis with the
+        # wrong range (0-1000 ns instead of 20-2000 ns).
+        # bin_width is in ps, convert to ns.
+        bin_width_ns = self.bin_width / 1000.0
+        self.histogram_time_axis = np.arange(1, bin_num + 1) * bin_width_ns
 
     def process_histogram(self, packet):
         """
