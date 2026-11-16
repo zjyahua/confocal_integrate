@@ -916,6 +916,30 @@ class ConfocalScanThread(QtCore.QThread):
         )
 
         # -------------------------
+        # Digital Channel 3: microwave TTL (spin control)
+        # -------------------------
+        mw_intervals = pulse_seq.get("MicroWave")
+
+        if mw_intervals is None:
+            mw_pattern = [(pulse_period_ns, 0)]          # 没有微波就保持低电平
+        else:
+            mw_pattern = cls.convert_high_intervals_to_segments(
+                mw_intervals,
+                pulse_period_ns
+            )
+
+        mw_forward_seq = cls.repeat_segments_to_duration(
+            mw_pattern,
+            forward_scan_time_ns
+        )
+
+        mw_seq = cls._normalize_segments(
+            [(delay_ns, 0)]
+            + mw_forward_seq
+            + [(fly_back_time_ns, 0)]
+        )
+
+        # -------------------------
         # Channel 5: same with laser sequence for Timetagger
         # to calculate the time difference with APD photon signal
         # -------------------------
@@ -935,6 +959,7 @@ class ConfocalScanThread(QtCore.QThread):
         seq_list = [
             (0, laser_seq),
             (1, sig_seq),
+            (3, mw_seq),
             (5, timetagger_seq),
             (6, awg_seq),
             (0, aom_voltage_seq)
