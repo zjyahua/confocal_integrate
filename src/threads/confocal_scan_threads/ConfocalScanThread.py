@@ -387,7 +387,6 @@ class ConfocalScanThread(QtCore.QThread):
                     break
 
                 self._move_second_axis(second_pos)
-                print(second_pos)
 
                 try:
                     if i == 1:

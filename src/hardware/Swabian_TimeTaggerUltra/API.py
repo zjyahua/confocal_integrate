@@ -1,3 +1,5 @@
+import time
+
 import TimeTagger
 
 class TimeTaggerCounter():
@@ -295,8 +297,27 @@ class TimeTaggerCounter():
     def wait_flim_finished(self):
         self.flim.waitUntilFinished(timeout=-1)
 
-    def wait_gate_finished(self):
-        self.gate.waitUntilFinished(timeout=-1)
+    def wait_gate_finished(self, timeout_s=2.0, poll_s=0.0005):
+        """
+        Block until the gate counter has filled all its n_values.
+
+        waitUntilFinished() may only be used together with startFor(). The gate
+        measurement is started with start(), which the library treats as running
+        indefinitely: it logs "Cannot wait on a measurement ... that's set to run
+        indefinitely" and returns immediately, so gate data was read before the
+        last gate had been processed. CountBetweenMarkers.ready() tells whether
+        the data array is full, so poll that instead.
+
+        Returns True when all values are filled, False on timeout.
+        """
+        deadline = time.monotonic() + float(timeout_s)
+
+        while not self.gate.ready():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_s)
+
+        return True
 
     def get_flim_scan_current_data(self):
         # arr = self.flim_scan.getData()

@@ -118,7 +118,7 @@ class SinglePointscanThread(QtCore.QThread):
             elif self.count_mode == "Gate":
                 if self.scan_type == "Time Scan":
                     self._run_time_scan()
-                elif self.scan_type == "Frequency Scan":
+                elif self.scan_type == "Freq Scan":
                     self._run_frequency_scan()
                 else:
                     raise ValueError(f"Unknown scan type: {self.scan_type}")
@@ -280,9 +280,15 @@ class SinglePointscanThread(QtCore.QThread):
                     self._hardware.pulser.start_now()
                     self._wait_pulser_finished()
 
-                    # If your counter has a real wait method, use it.
+                    # Wait until every gate value has been acquired. Reading the
+                    # counter too early silently returns zeros for the tail.
                     if hasattr(self._hardware.counter, "wait_gate_finished"):
-                        self._hardware.counter.wait_gate_finished()
+                        if not self._hardware.counter.wait_gate_finished():
+                            raise RuntimeError(
+                                "Gate counter did not become ready after the pulse "
+                                "sequence; check that one period emits exactly "
+                                "2 gates (Ref + Sig) and that average_num matches."
+                            )
                     else:
                         time.sleep(0.05)
 

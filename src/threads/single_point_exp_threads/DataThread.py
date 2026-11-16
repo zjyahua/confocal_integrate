@@ -119,7 +119,7 @@ class DataThread(QtCore.QObject):
                 if scan_type == "Time Scan":
                     self.process_gate_time(packet)
 
-                elif scan_type == "Frequency Scan":
+                elif scan_type == "Freq Scan":
                     self.process_gate_frequency(packet)
 
                 else:
@@ -451,7 +451,7 @@ class DataThread(QtCore.QObject):
 
         self._process_gate_scan(
             packet,
-            scan_type="Frequency Scan",
+            scan_type="Freq Scan",
             plot_type="frequency_scan",
             x_key="frequency",
 
