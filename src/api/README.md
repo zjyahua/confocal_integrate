@@ -1,0 +1,135 @@
+# 实验控制 API（headless）
+
+目标：同一个控制面同时服务两种场景。
+
+- **UI 关着**：CLI 直接跑（无窗口），把图渲染成 PNG，在对话里贴给用户。
+- **UI 开着**：CLI 把命令转发给 GUI 里的控制服务，参数回填到界面、扫描在界面上实时显示。
+
+## 结构
+
+```
+        ┌──────────────────────────────┐
+        │  src/api/jobs.JobRunner      │  任务表 + 执行（单硬件锁）
+        └──────────┬───────────────────┘
+                   │ executor(job)
+     ┌─────────────┴──────────────┐
+     │                            │
+main.py (Qt, 宿主)          cli.py (无窗口)
+  ├─ 控制服务嵌入              ├─ 找不到服务 → 本地执行
+  ├─ 参数回填 UI               └─ 输出 JSON / PNG
+  └─ 数据画到窗口
+```
+
+| 文件 | 职责 |
+| --- | --- |
+| `models.py` | `Job` 数据结构与状态常量 |
+| `plan.py` | 参数校验、波形构建、段数与耗时估计（**不碰硬件**） |
+| `jobs.py` | 后台执行、进度、停止、互斥锁 |
+| `render.py` | matplotlib Agg → PNG（扫描图、曲线、直方图） |
+| `server.py` | localhost HTTP 控制服务（可嵌入 GUI，也可独立运行） |
+| `client.py` | CLI 用的轻量客户端 |
+| `cli.py` | 命令行入口 |
+
+## 命令行
+
+```bash
+# 只做规划，不碰硬件
+python -m src.api.cli scan  --mode intensity --dwell-ms 0.05 --resolution 100 --dry-run
+python -m src.api.cli point --mode freq --start 2800 --end 2940 --step 1 \
+                            --loops 10 --average 10000 --dry-run
+
+# 控制服务（UI 未开时可选；不开也能跑，CLI 会本地执行）
+python -m src.api.cli serve --port 8765
+
+# 任务查询
+python -m src.api.cli status
+python -m src.api.cli result --job <job_id>
+python -m src.api.cli stop   --job <job_id>
+
+# 渲染演示
+python -m src.api.cli demo --out experiments/demo
+```
+
+`--json` 输出机器可读结果，便于 agent 解析。
+
+## 输出位置
+
+默认写到 **`C:/zjh/experiment data/<YYYY.MM.DD>/api/<时间戳>/`**，不再放在代码目录里。
+用 `CONFOCAL_DATA_ROOT` 环境变量可以改根目录，`--out` 可以指定具体目录。
+
+```
+<out_dir>/
+├── params.json     提交时的参数快照
+├── plan.json       校验与规划结果（段数、耗时估计）
+├── summary.json    结束时的摘要（拟合参数/错误）
+└── (真实扫描后) raw.txt / image.png / live.png
+```
+
+## HTTP 契约
+
+服务只监听 `127.0.0.1`，端口与 token 写在仓库根目录的 `.api_port` / `.api_token`。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/health` | `{ok, gui, jobs}` |
+| POST | `/jobs` | `{kind, params, out_dir, dry_run}` → Job |
+| GET | `/jobs?limit=N` | 最近任务列表 |
+| GET | `/job?job_id=X` | 单个任务 |
+| GET | `/result?job_id=X` | 任务 + 文件绝对路径 |
+| POST | `/stop` | `{job_id}` |
+
+所有请求需带 `X-Api-Token` 头。
+
+## 接入 Qt 界面
+
+`main.py` 里创建服务，并把执行器指向 Qt 线程：
+
+```python
+from src.api.jobs import JobRunner
+from src.api.server import start_service
+
+class mainGUI(...):
+    def __init__(self):
+        ...
+        self.api_runner = JobRunner(executor=self.api_execute_job)
+        self.api_server, self.api_thread, self.api_port = start_service(
+            self.api_runner, gui=self
+        )
+
+    def api_execute_job(self, job):
+        """在 worker 线程被调用：切回 Qt 主线程执行并等待结果。"""
+        return self._call_on_gui_thread(lambda: self._run_job_on_gui(job))
+
+    def _run_job_on_gui(self, job):
+        # 1) job.params 回填到界面控件（让操作者看到 AI 设了什么）
+        # 2) 调用界面里“开始”按钮走的同一个函数
+        # 3) 等待扫描线程结束
+        # 4) 返回 summary dict
+```
+
+`_call_on_gui_thread` 可以用一个信号 + 事件实现：
+
+```python
+job_call = QtCore.pyqtSignal(object)
+...
+self.job_call.connect(self._handle_job_call)   # 跨线程自动排队
+
+def _call_on_gui_thread(self, fn):
+    box, done = {}, threading.Event()
+    self._pending = (fn, box, done)
+    self.job_call.emit(None)
+    done.wait()
+    return box.get("value")
+```
+
+## 当前状态
+
+- ✅ `plan`：两类任务的参数校验、波形构建、段数与耗时估计
+- ✅ `jobs`：后台执行、状态机、输出落盘、硬件互斥锁
+- ✅ `server` / `client` / `cli`：三种运行方式（本地、独立服务、GUI 内嵌）
+- ✅ `render`：扫描图、扫描曲线、直方图（无需 Qt）
+- ✅ `execute`：共聚焦**强度扫描**已接真机（`ConfocalScanThread` + `DataThread`，
+  无需 Qt 窗口），输出 `raw.txt` / `image.png` / `summary.json`
+- ✅ `--z` 缺省时读取位移台当前位置，不会擅自移动 Z
+- ⏳ 时间扫描（FLIM）与点测量（ODMR / Rabi / T1）的执行器还没接
+- ⏳ Qt 界面内嵌控制服务（参数回填 + 界面实时显示）还没接

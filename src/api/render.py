@@ -1,0 +1,134 @@
+"""PNG rendering with matplotlib's Agg backend (no Qt, no window).
+
+Every figure the agent shows in chat is produced here, so the plotting
+style stays consistent no matter whether the Qt GUI is open or not.
+"""
+
+from __future__ import annotations
+
+import os
+
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+
+STYLE = {
+    "figsize": (7.2, 5.0),
+    "dpi": 140,
+    "grid_alpha": 0.3,
+}
+
+
+def _save(fig, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(path, dpi=STYLE["dpi"])
+    plt.close(fig)
+    return path
+
+
+def render_map(map2d, path, title="", xlabel="x", ylabel="y", unit="", extent=None):
+    """2D intensity / lifetime image."""
+    data = np.asarray(map2d, dtype=float)
+    fig, ax = plt.subplots(figsize=STYLE["figsize"])
+
+    image = ax.imshow(
+        data,
+        origin="lower",
+        aspect="auto",
+        cmap="inferno",
+        interpolation="nearest",
+        extent=extent,
+    )
+    fig.colorbar(image, ax=ax, label="counts" if not unit else unit)
+
+    ax.set_title(title or "scan")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    return _save(fig, path)
+
+
+def render_sweep(x, sig, ref=None, path="sweep.png", title="", xlabel="", ylabel=""):
+    """Point measurement: signal (and optionally reference) versus the sweep."""
+    x = np.asarray(x, dtype=float)
+    sig = np.asarray(sig, dtype=float)
+
+    fig, ax = plt.subplots(figsize=STYLE["figsize"])
+    ax.plot(x, sig, "o-", ms=3, lw=1.2, label="signal")
+
+    if ref is not None:
+        ref = np.asarray(ref, dtype=float)
+        ax.plot(x, ref, "s--", ms=3, lw=1.0, label="reference")
+        if np.all(ref != 0):
+            ax2 = ax.twinx()
+            ax2.plot(x, sig / ref, "-", lw=1.6, color="tab:red", label="sig/ref")
+            ax2.set_ylabel("signal / reference")
+
+    ax.set_title(title or "point sweep")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=STYLE["grid_alpha"])
+    ax.legend(loc="best")
+    return _save(fig, path)
+
+
+def render_histogram(counts, path="hist.png", title="", xlabel="time (ns)"):
+    """Histogram / FLIM trace of a single pixel."""
+    counts = np.asarray(counts, dtype=float)
+    fig, ax = plt.subplots(figsize=STYLE["figsize"])
+    ax.bar(np.arange(counts.size), counts, width=1.0)
+    ax.set_title(title or "histogram")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("counts")
+    ax.grid(alpha=STYLE["grid_alpha"])
+    return _save(fig, path)
+
+
+def render_progress(packets, path, title="", xlabel="", ylabel=""):
+    """Live figure from the accumulated point-scan packets."""
+    from collections import defaultdict
+
+    table = defaultdict(lambda: {"sig": 0.0, "ref": 0.0, "n": 0})
+    for packet in packets:
+        key = packet.get("frequency")
+        if key is None:
+            key = packet.get("time_point")
+        entry = table[key]
+        entry["sig"] += float(packet.get("sig", 0))
+        entry["ref"] += float(packet.get("ref", 0))
+        entry["n"] += 1
+
+    if not table:
+        return None
+
+    xs = sorted(table)
+    sig = [table[k]["sig"] / max(table[k]["n"], 1) for k in xs]
+    ref = [table[k]["ref"] / max(table[k]["n"], 1) for k in xs]
+    return render_sweep(xs, sig, ref, path=path, title=title, xlabel=xlabel, ylabel=ylabel)
+
+
+def demo(out_dir):
+    """Render fake data, to check the visual style without hardware."""
+    os.makedirs(out_dir, exist_ok=True)
+    rng = np.random.default_rng(7)
+
+    yy, xx = np.mgrid[0:100, 0:100]
+    blob = 3000 * np.exp(-(((xx - 50) ** 2) + ((yy - 45) ** 2)) / (2 * 9.0 ** 2))
+    map2d = rng.normal(20, 4, size=(100, 100)) + blob
+
+    x = np.linspace(2800, 2940, 141)
+    sig = 10000 + rng.normal(0, 40, x.size)
+    ref = 10000 + rng.normal(0, 40, x.size)
+    for centre, fwhm, depth in ((2836.4, 31.3, 280.0), (2904.3, 28.3, 290.0)):
+        sig -= depth / (1 + ((x - centre) / (fwhm / 2)) ** 2)
+    ratio_sig = sig / 1.0
+
+    files = [
+        render_map(map2d, os.path.join(out_dir, "demo_map.png"), title="demo scan"),
+        render_sweep(x, ratio_sig / ref, None, path=os.path.join(out_dir, "demo_sweep.png"),
+                     title="demo ODMR (sig/ref)", xlabel="frequency (MHz)"),
+    ]
+    return files

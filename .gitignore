@@ -48,3 +48,8 @@ ui/ui_files/Lifetime/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# ---- 实验控制 API ----
+.api_token
+.api_port
+experiments/
