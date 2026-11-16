@@ -54,6 +54,10 @@ class ConfocalScanThread(QtCore.QThread):
         # and add the two passes. Intensity scan only.
         self.sin_return_scan = True
 
+        # Sin mode gates. False: same gate length for every pixel.
+        # True: position based, the gate covers the whole pixel. Intensity scan only.
+        self.sin_full_pixel_gate = True
+
         # Piezo intensity scan
         # self.scan_time_pixel = int(self.dwell_time)*1000  # 10ms is better for piezo stage
         self.piezo_extra_gates = 10  # 原来 piezo 100 resolution 时 configure_scan 110
@@ -414,6 +418,8 @@ class ConfocalScanThread(QtCore.QThread):
                     self.ctsArr = self._hardware.counter.get_scan_data()
                     if return_scan:
                         self.ctsArr = self.add_return_scan(self.ctsArr, nx_pixel)
+                    if self.galvo_waveform == "Sin" and self.sin_full_pixel_gate:
+                        self.ctsArr = self._scale_to_shortest_gate(self.ctsArr)
 
                 except Exception as e:
                     print(e, second_pos)
@@ -642,9 +648,14 @@ class ConfocalScanThread(QtCore.QThread):
         Returns pulse_seq_first, pulse_seq_normal, scan_freq_hz
         """
         durations_ns = self.sin_pixel_durations_ns(self.scan_dwell_time, self.resolution)
-        return_scan = self.sin_return_scan and pulse_seq is None  # intensity scan only
-        first, freq, _ = self.generate_time_by_duration_time(durations_ns, 0, pulse_seq, return_scan=return_scan)
-        normal, _, _ = self.generate_time_by_duration_time(durations_ns, 1, pulse_seq, return_scan=return_scan)
+        return_scan = self.sin_return_scan and pulse_seq is None
+        full_gate = self.sin_full_pixel_gate and pulse_seq is None
+        first, freq, _ = self.generate_time_by_duration_time(
+            durations_ns, 0, pulse_seq, return_scan=return_scan, full_pixel_gate=full_gate
+        )
+        normal, _, _ = self.generate_time_by_duration_time(
+            durations_ns, 1, pulse_seq, return_scan=return_scan, full_pixel_gate=full_gate
+        )
         self._hardware.scanner.scan_mode_sin_analog(float(x_start), float(x_end), freq)
         return first, normal, freq
 
@@ -667,8 +678,36 @@ class ConfocalScanThread(QtCore.QThread):
         forward_ns = float(dwell_time_ms) * 1e6 / np.diff(edges).min()
         return np.diff(np.round(edges * forward_ns)).astype(int).tolist()
 
+    @staticmethod
+    def sin_gate_lengths_ns(durations_ns, gate_high_ratio=0.9, full_pixel_gate=False):
+        """
+        Gate length (ns) of every pixel of a sine X scan.
+
+        full_pixel_gate=False : every pixel gets the same gate, gate_high_ratio x shortest pixel.
+        full_pixel_gate=True  : position based. The gate stays open for the whole time the
+                                mirror is inside the pixel, so it is long at the line ends
+                                and short in the middle. Between two gates only the short
+                                gap of the shortest pixel is left.
+        """
+        gate_ns = max(1, int(min(durations_ns) * gate_high_ratio))
+        if not full_pixel_gate:
+            return [gate_ns] * len(durations_ns)
+        gap_ns = min(durations_ns) - gate_ns
+        return [duration - gap_ns for duration in durations_ns]
+
+    def _scale_to_shortest_gate(self, counts):
+        """
+        Full pixel gates count for different times, so pixels at the line ends collect
+        more photons. Scale every pixel to the shortest gate: the image then shows
+        counts per equal time again, like the equal gate mode.
+        """
+        durations_ns = self.sin_pixel_durations_ns(self.scan_dwell_time, self.resolution)
+        gates_ns = np.array(self.sin_gate_lengths_ns(durations_ns, full_pixel_gate=True))
+        counts = np.asarray(counts).reshape(-1, len(gates_ns))  # one row per line
+        return np.rint(counts * gates_ns.min() / gates_ns).astype(int).reshape(-1).tolist()
+
     @classmethod
-    def generate_time_by_duration_time(cls, durations_ns, first_line=0, pulse_seq=None, gate_high_ratio=0.9, return_scan=False):
+    def generate_time_by_duration_time(cls, durations_ns, first_line=0, pulse_seq=None, gate_high_ratio=0.9, return_scan=False, full_pixel_gate=False):
         """
         Generate pulse sequence for a sine X scan from the time of each pixel.
 
@@ -678,11 +717,13 @@ class ConfocalScanThread(QtCore.QThread):
                        laser pulse dict for time scan (same as generate_time_sequence_by_dwell_ms)
         return_scan  : False leaves the return (falling) half without gates,
                        True scans the same line once more on the way back
+        full_pixel_gate : False for equal gates, True for position based gates
+                          (see sin_gate_lengths_ns)
 
         Forward scan = sum(durations_ns) = rising half of the sine.
         Flyback = falling half, same length, so one AWG period = 2 x forward.
 
-        Every pixel gets the same gate length (gate_high_ratio x shortest pixel),
+        By default every pixel gets the same gate length (gate_high_ratio x shortest pixel),
         centred in its own time window, so all pixels count photons for the same time.
 
         Returns seq_list, scan_freq_hz, line_period_ns (same as the dwell based functions)
@@ -695,10 +736,10 @@ class ConfocalScanThread(QtCore.QThread):
         # Delay before first/normal line
         delay_ns = int(1e8) if first_line == 0 else int(1e7)
 
-        # Channel 1: counter gate, one equal length gate in the middle of each pixel
-        gate_ns = max(1, int(min(durations_ns) * gate_high_ratio))
+        # Channel 1: counter gate, one gate in the middle of each pixel
+        gates_ns = cls.sin_gate_lengths_ns(durations_ns, gate_high_ratio, full_pixel_gate)
         sig_seq = [(delay_ns, 0)]
-        for duration in durations_ns:
+        for duration, gate_ns in zip(durations_ns, gates_ns):
             lead_ns = (duration - gate_ns) // 2
             sig_seq += [(lead_ns, 0), (gate_ns, 1), (duration - gate_ns - lead_ns, 0)]
         # Return half: no gates, or the forward gates mirrored in time, because the
