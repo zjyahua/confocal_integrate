@@ -376,7 +376,7 @@ class SinglePointscanThread(QtCore.QThread):
         self._hardware.pulser.trigger_mode()
         self._hardware.pulser.upload_seq_list(seq, average_num)
 
-    def _auto_track_if_needed_after_scan_point(self, ref):
+    def _auto_track_if_needed_after_scan_point(self, ref, pulse_seq=None):
         """
         Run auto track if ref is below threshold
 
@@ -391,6 +391,9 @@ class SinglePointscanThread(QtCore.QThread):
 
         if int(ref) >= int(self.threshold):
             return True
+
+        if pulse_seq is None:
+            pulse_seq = self.pulse_seq_freq
 
         msg =(
             f"Starting auto tracking..."
@@ -419,7 +422,7 @@ class SinglePointscanThread(QtCore.QThread):
 
         # return pulser to trigger mode
         try:
-            self._prepare_pulser_base_on_seq(self.pulse_seq_freq,self.average_num)
+            self._prepare_pulser_base_on_seq(pulse_seq,self.average_num)
         except Exception as e:
             msg = f"Failed to restore pulser after tracking: {e}"
             self.error_occurred.emit(msg)
@@ -529,11 +532,10 @@ class SinglePointscanThread(QtCore.QThread):
         point_num = int(time_arr.size)
 
         gates_per_point = int(self.average_num) * 2
-        gates_per_loop = gates_per_point * point_num
 
         try:
             self._hardware.counter.configure_gate(
-                number_of_gates=int(gates_per_loop)
+                number_of_gates=int(gates_per_point)
             )
 
             self._hardware.counter.start_gate_measure()
@@ -560,6 +562,16 @@ class SinglePointscanThread(QtCore.QThread):
 
                     self.pulse_seq_update_with_time = self.update_time_to_seq(self.pulse_seq, time_point)
 
+                    # Wait budget from the pulse period of this time point.
+                    # A malformed sequence is reported by generate_pulse_sequence
+                    # below, so fall back to a safe default here.
+                    gate_wait_s = 10.0
+                    try:
+                        pulse_period_ns = int(float(self.pulse_seq_update_with_time["Sum"][0]))
+                        gate_wait_s = max(1.0, 3.0 * pulse_period_ns * int(self.average_num) / 1e9)
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        pass
+
                     self.pulse_seq_time = self.generate_pulse_sequence(
                         self.pulse_seq_update_with_time,
                         self.count_mode
@@ -569,19 +581,36 @@ class SinglePointscanThread(QtCore.QThread):
                     self._hardware.pulser.start_now()
                     self._wait_pulser_finished()
 
-                    time.sleep(0.05)
+                    # Wait until the gate values have been acquired. Reading the
+                    # counter too early silently returns zeros for the tail.
+                    if hasattr(self._hardware.counter, "wait_gate_finished"):
+                        wait_start = time.monotonic()
+                        finished = self._hardware.counter.wait_gate_finished(
+                            timeout_s=gate_wait_s
+                        )
+                        wait_elapsed = time.monotonic() - wait_start
+
+                        filled, expected, running = (
+                            self._hardware.counter.get_gate_progress()
+                        )
+                        fill_ratio = filled / expected if expected else 1.0
+
+                        # A few missing gates at the end are tolerated; only
+                        # report when the wait failed or a lot is missing.
+                        if (not finished) or fill_ratio < 0.99:
+                            print(
+                                f"[gate diag] time={time_point} point={point_idx} "
+                                f"finished={finished} "
+                                f"filled={filled}/{expected} "
+                                f"running={running} "
+                                f"waited={wait_elapsed:.2f}s"
+                            )
+                    else:
+                        time.sleep(0.05)
+
                     gate_data = np.asarray(self._hardware.counter.get_gate_data()).ravel()
 
-                    start = gates_per_point * point_idx
-                    end = start + gates_per_point
-
-                    if gate_data.size < end:
-                        raise RuntimeError(
-                            f"Not enough gate data. "
-                            f"Need {end}, got {gate_data.size}."
-                        )
-
-                    cts_arr = gate_data[start:end]
+                    cts_arr = gate_data[:gates_per_point]
 
                     ref = int(np.sum(cts_arr[0::2]))
                     sig = int(np.sum(cts_arr[1::2]))
@@ -605,10 +634,16 @@ class SinglePointscanThread(QtCore.QThread):
 
                     self.data_update.emit(packet)
 
-                if hasattr(self._hardware.counter, "gate_recount"):
-                    self._hardware.counter.gate_recount()
+                    keep_scanning = self._auto_track_if_needed_after_scan_point(
+                        ref, pulse_seq=self.pulse_seq_time
+                    )
+                    if not keep_scanning:
+                        break
 
-                time.sleep(0.1)
+                    if hasattr(self._hardware.counter, "gate_recount"):
+                        self._hardware.counter.gate_recount()
+
+                    time.sleep(0.1)
 
         finally:
             self._cleanup_time_scan()
