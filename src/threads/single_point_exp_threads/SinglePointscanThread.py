@@ -239,6 +239,19 @@ class SinglePointscanThread(QtCore.QThread):
 
         gates_per_point = int(self.average_num) * 2
 
+        # One frequency point repeats the sequence average_num times, so the
+        # counter cannot be full before roughly average_num x pulse period.
+        # Give the wait three times that long (and at least 1 s).
+        gate_wait_s = 10.0
+
+        if self.pulse_seq and "Sum" in self.pulse_seq:
+            try:
+                pulse_period_ns = int(float(self.pulse_seq["Sum"][0]))
+                point_duration_s = pulse_period_ns * int(self.average_num) / 1e9
+                gate_wait_s = max(1.0, 3.0 * point_duration_s)
+            except (IndexError, TypeError, ValueError):
+                pass
+
         try:
             self._hardware.counter.configure_gate(
                 number_of_gates=int(gates_per_point)
@@ -280,14 +293,29 @@ class SinglePointscanThread(QtCore.QThread):
                     self._hardware.pulser.start_now()
                     self._wait_pulser_finished()
 
-                    # Wait until every gate value has been acquired. Reading the
+                    # Wait until the gate values have been acquired. Reading the
                     # counter too early silently returns zeros for the tail.
                     if hasattr(self._hardware.counter, "wait_gate_finished"):
-                        if not self._hardware.counter.wait_gate_finished():
-                            raise RuntimeError(
-                                "Gate counter did not become ready after the pulse "
-                                "sequence; check that one period emits exactly "
-                                "2 gates (Ref + Sig) and that average_num matches."
+                        wait_start = time.monotonic()
+                        finished = self._hardware.counter.wait_gate_finished(
+                            timeout_s=gate_wait_s
+                        )
+                        wait_elapsed = time.monotonic() - wait_start
+
+                        filled, expected, running = (
+                            self._hardware.counter.get_gate_progress()
+                        )
+                        fill_ratio = filled / expected if expected else 1.0
+
+                        # A few missing gates at the end are tolerated; only
+                        # report when the wait failed or a lot is missing.
+                        if (not finished) or fill_ratio < 0.99:
+                            print(
+                                f"[gate diag] freq={freq:.3f} point={point_idx} "
+                                f"finished={finished} "
+                                f"filled={filled}/{expected} "
+                                f"running={running} "
+                                f"waited={wait_elapsed:.2f}s"
                             )
                     else:
                         time.sleep(0.05)

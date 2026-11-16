@@ -1,5 +1,6 @@
 import time
 
+import numpy as np
 import TimeTagger
 
 class TimeTaggerCounter():
@@ -297,27 +298,74 @@ class TimeTaggerCounter():
     def wait_flim_finished(self):
         self.flim.waitUntilFinished(timeout=-1)
 
-    def wait_gate_finished(self, timeout_s=2.0, poll_s=0.0005):
+    def wait_gate_finished(self, timeout_s=None, poll_s=0.005, sample_s=0.02, stall_s=0.15):
         """
-        Block until the gate counter has filled all its n_values.
+        Wait until the gate counter has collected its values.
 
-        waitUntilFinished() may only be used together with startFor(). The gate
-        measurement is started with start(), which the library treats as running
-        indefinitely: it logs "Cannot wait on a measurement ... that's set to run
-        indefinitely" and returns immediately, so gate data was read before the
-        last gate had been processed. CountBetweenMarkers.ready() tells whether
-        the data array is full, so poll that instead.
+        ready() only turns True when every slot of the buffer is filled. The
+        tagger can miss a gate at the very start or end of a run, in which case
+        ready() never turns True even though the data is complete, so the wait
+        also ends once the data has stopped changing for stall_s. A couple of
+        missing gates are tolerated by the callers.
 
-        Returns True when all values are filled, False on timeout.
+        timeout_s : total budget in seconds (None -> 10 s). Callers that know
+            the acquisition time (pulse period x repetitions) should pass it,
+            otherwise long averaging runs are cut short.
+        poll_s : how often ready() is checked (cheap).
+        sample_s : how often getData() is compared for stall detection
+            (expensive for large buffers, so kept slower than poll_s).
+
+        Returns True when the buffer is full or the data stopped growing, False
+        only when the budget ran out while data was still arriving.
         """
-        deadline = time.monotonic() + float(timeout_s)
+        budget = 10.0 if timeout_s is None else max(0.5, float(timeout_s))
+        start = time.monotonic()
+        next_sample = start + sample_s
 
-        while not self.gate.ready():
-            if time.monotonic() >= deadline:
+        last_sample = None
+        last_change = start
+
+        while True:
+            if self.gate.ready():
+                return True
+
+            now = time.monotonic()
+
+            if now - start >= budget:
                 return False
+
+            if now >= next_sample:
+                data = self.gate.getData()
+
+                if last_sample is None or not np.array_equal(data, last_sample):
+                    last_sample = data
+                    last_change = now
+                elif now - last_change >= stall_s:
+                    # Everything that is going to arrive has arrived; a missing
+                    # gate or two at the end is acceptable.
+                    return True
+
+                next_sample = now + sample_s
+
             time.sleep(poll_s)
 
-        return True
+    def get_gate_progress(self):
+        """
+        Diagnostic snapshot of the gate counter.
+
+        getIndex() stores the start time of every bin and leaves unfilled bins
+        at zero, so counting the non-zero entries gives the exact number of
+        filled cells (unlike the counts, which are legitimately zero for a gate
+        without photons).
+
+        Returns (filled_cells, expected_cells, still_running).
+        """
+        try:
+            filled = int(np.count_nonzero(np.asarray(self.gate.getIndex())))
+        except Exception:
+            filled = int(np.count_nonzero(np.asarray(self.gate.getData())))
+
+        return filled, int(self._number_of_gates), bool(self.gate.isRunning())
 
     def get_flim_scan_current_data(self):
         # arr = self.flim_scan.getData()
