@@ -960,16 +960,36 @@ class mainGUI(QtWidgets.QMainWindow):
         self.ScanRefPlot.set_data(x, ref_y)
 
         ax = self.ScanSigPlot.axes
-        self._autoscale_axis(ax, x, [sig_y, ref_y], force_y_zero=False)
+
+        # Put the bottom of the y_axis slightly below the lowest point of either
+        # curve, so sig and ref both stay fully visible instead of being
+        # squeezed against zero.
+        finite_values = [
+            finite
+            for finite in (sig_y[np.isfinite(sig_y)], ref_y[np.isfinite(ref_y)])
+            if finite.size > 0
+        ]
+        y_lower = (
+            0.9 * min(float(np.min(finite)) for finite in finite_values)
+            if finite_values
+            else None
+        )
+
+        self._autoscale_axis(ax, x, [sig_y, ref_y], y_lower=y_lower)
         ax.figure.canvas.draw_idle()
 
         self._update_loop_point_ui(data, update_point=True)
         self._update_track_ui(data, sig_y, ref_y)
 
     @staticmethod
-    def _autoscale_axis(ax, x,  y_list, force_y_zero=False):
+    def _autoscale_axis(ax, x, y_list, force_y_zero=False, y_lower=None):
         """
-        Auto scale x/y axis safely.
+        Autoscale x/y_axis safely.
+
+        y_lower : float, optional
+            Explicit bottom of the y_axis. When omitted the axis starts at zero
+            for histogram data (force_y_zero=True) and just below the minimum of
+            the data otherwise, so curves are not flattened against zero.
         """
 
         x = np.asarray(x, dtype=float)
@@ -1005,10 +1025,11 @@ class mainGUI(QtWidgets.QMainWindow):
         if y_max <= 0:
             y_max = 1.0
 
-        if force_y_zero or y_min >= 0:
-            ax.set_ylim(0, y_max * 1.1)
-        else:
-            ax.set_ylim(y_min * 1.1, y_max * 1.1)
+        if y_lower is None:
+            # histogram starts at zero, other data starts just below its minimum
+            y_lower = 0.0 if force_y_zero else y_min * 0.9
+
+        ax.set_ylim(y_lower, y_max * 1.1)
 
     def _update_loop_point_ui(self, data, update_point=False):
         """
