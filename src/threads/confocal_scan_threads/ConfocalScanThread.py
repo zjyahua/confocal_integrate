@@ -47,6 +47,9 @@ class ConfocalScanThread(QtCore.QThread):
         self.scan_dwell_time = 1  #ms 10Hz for 100 resolution
         self.scan_freq = 10
 
+        # Galvo X waveform: "Ramp" (sawtooth) or "Sin"
+        self.galvo_waveform = "Sin"
+
         # Piezo intensity scan
         # self.scan_time_pixel = int(self.dwell_time)*1000  # 10ms is better for piezo stage
         self.piezo_extra_gates = 10  # 原来 piezo 100 resolution 时 configure_scan 110
@@ -179,16 +182,7 @@ class ConfocalScanThread(QtCore.QThread):
         if resolution <= 0:
             raise ValueError("Resolution must be positive.")
 
-        # Use exactly the same definition as the image axis in DataThread
-        # (confocal_scan.configure_data_thread_before_scan: np.linspace(..., endpoint=False)).
-        # np.arange would return ceil((end - start) / step) points, which can be
-        # resolution + 1 depending on floating point rounding of the coordinates.
-        second_axis = np.linspace(
-            second_start,
-            second_end,
-            resolution,
-            endpoint=False,
-        )
+        second_axis = np.arange(second_start, second_end, second_step, dtype=float)
 
         return x_start, x_end, x_step, second_axis, fixed_axis_pos
 
@@ -371,6 +365,12 @@ class ConfocalScanThread(QtCore.QThread):
                 self.scan_freq
             )
 
+            # Sin mode: replace the ramp sequences and AWG setting above with the sine version
+            if self.galvo_waveform == "Sin":
+                self.pulse_seq_first, self.pulse_seq_normal, self.scan_freq = (
+                    self._setup_sin_x_scan(x_start, x_end)
+                )
+
             self._hardware.scanner.scanning_analog()
             self._hardware.counter.start_scan_measure()
 
@@ -492,6 +492,12 @@ class ConfocalScanThread(QtCore.QThread):
                 self.scan_freq
             )
 
+            # Sin mode: replace the ramp sequences and AWG setting above with the sine version
+            if self.galvo_waveform == "Sin":
+                self.pulse_seq_first, self.pulse_seq_normal, self.scan_freq = (
+                    self._setup_sin_x_scan(x_start, x_end, self.pulse_seq)
+                )
+
             self._hardware.scanner.scanning_analog()
             self._hardware.counter.start_flim_scan_measure()
 
@@ -611,6 +617,99 @@ class ConfocalScanThread(QtCore.QThread):
     def _wait_pulser_finished(self):
         while self.running and self._hardware.pulser.is_running():
             time.sleep(0.001)
+
+    def _setup_sin_x_scan(self, x_start, x_end, pulse_seq=None):
+        """
+        Sine X scan: build first/normal line pulse sequences and set the AWG to sine.
+
+        pulse_seq=None -> intensity scan, otherwise time (lifetime) scan.
+
+        Returns pulse_seq_first, pulse_seq_normal, scan_freq_hz
+        """
+        durations_ns = self.sin_pixel_durations_ns(self.scan_dwell_time, self.resolution)
+        first, freq, _ = self.generate_time_by_duration_time(durations_ns, 0, pulse_seq)
+        normal, _, _ = self.generate_time_by_duration_time(durations_ns, 1, pulse_seq)
+        self._hardware.scanner.scan_mode_sin_analog(float(x_start), float(x_end), freq)
+        return first, normal, freq
+
+    @staticmethod
+    def sin_pixel_durations_ns(dwell_time_ms, resolution):
+        """
+        Pixel times (ns) for the forward (rising) half of a sine X scan.
+
+        Mirror position over the forward half: x(t) = (1 - cos(pi * t / T)) / 2, from 0 to 1.
+        Pixel k ends at x = k / N, so it ends at time t_k = T * arccos(1 - 2k / N) / pi.
+
+        The mirror is fastest in the middle of the line, so the middle pixel is the
+        shortest. T is chosen so that the shortest pixel lasts dwell_time_ms.
+
+        Example (resolution=100, dwell 1 ms): middle pixels 1 ms, edge pixels about 10 ms,
+        forward half about 157 ms.
+        """
+        k = np.arange(int(resolution) + 1)
+        edges = np.arccos(1 - 2 * k / resolution) / np.pi  # pixel edges as fraction of T
+        forward_ns = float(dwell_time_ms) * 1e6 / np.diff(edges).min()
+        return np.diff(np.round(edges * forward_ns)).astype(int).tolist()
+
+    @classmethod
+    def generate_time_by_duration_time(cls, durations_ns, first_line=0, pulse_seq=None, gate_high_ratio=0.9):
+        """
+        Generate pulse sequence for a sine X scan from the time of each pixel.
+
+        durations_ns : list of pixel times in ns (from sin_pixel_durations_ns)
+        first_line   : 0 for first line, 1 for normal line
+        pulse_seq    : None for intensity scan (laser always on),
+                       laser pulse dict for time scan (same as generate_time_sequence_by_dwell_ms)
+
+        Forward scan = sum(durations_ns) = rising half of the sine.
+        Flyback = falling half, same length, so one AWG period = 2 x forward.
+
+        Every pixel gets the same gate length (gate_high_ratio x shortest pixel),
+        centred in its own time window, so all pixels count photons for the same time.
+
+        Returns seq_list, scan_freq_hz, line_period_ns (same as the dwell based functions)
+        """
+        forward_ns = int(sum(durations_ns))
+        line_period_ns = 2 * forward_ns
+        fly_back_ns = line_period_ns - forward_ns
+        scan_freq_hz = 1e9 / line_period_ns
+
+        # Delay before first/normal line
+        delay_ns = int(1e8) if first_line == 0 else int(1e7)
+
+        # Channel 1: counter gate, one equal length gate in the middle of each pixel
+        gate_ns = max(1, int(min(durations_ns) * gate_high_ratio))
+        sig_seq = [(delay_ns, 0)]
+        for duration in durations_ns:
+            lead_ns = (duration - gate_ns) // 2
+            sig_seq += [(lead_ns, 0), (gate_ns, 1), (duration - gate_ns - lead_ns, 0)]
+        sig_seq = cls._normalize_segments(sig_seq + [(fly_back_ns, 0)])
+
+        # Analog Channel 0: AOM voltage on during delay + one full line period
+        aom_voltage_seq = [(delay_ns, 1.0), (line_period_ns, 1.0)]
+
+        # Channel 6: AWG trigger, high for 10% of one line period
+        trigger_ns = int(line_period_ns * 0.1)
+        awg_seq = [(delay_ns, 0), (trigger_ns, 1), (line_period_ns - trigger_ns, 0)]
+
+        if pulse_seq is None:
+            # Channel 0: laser always on (intensity scan)
+            laser_seq = [(delay_ns, 1), (line_period_ns, 1)]
+            seq_list = [(0, laser_seq), (1, sig_seq), (6, awg_seq), (0, aom_voltage_seq)]
+            return seq_list, scan_freq_hz, line_period_ns
+
+        # Channel 0: laser pulse pattern during the forward scan (time scan)
+        pulse_period_ns = int(float(pulse_seq["Sum"][0]))
+        laser_pattern = cls.convert_high_intervals_to_segments(pulse_seq["Laser"], pulse_period_ns)
+        laser_seq = cls._normalize_segments(
+            [(delay_ns, 0)]
+            + cls.repeat_segments_to_duration(laser_pattern, forward_ns)
+            + [(fly_back_ns, 0)]
+        )
+
+        # Channel 5: same as laser sequence, for Time Tagger lifetime start
+        seq_list = [(0, laser_seq), (1, sig_seq), (5, list(laser_seq)), (6, awg_seq), (0, aom_voltage_seq)]
+        return seq_list, scan_freq_hz, line_period_ns
 
     @staticmethod
     def generate_intensity_sequence_by_dwell_ms(
