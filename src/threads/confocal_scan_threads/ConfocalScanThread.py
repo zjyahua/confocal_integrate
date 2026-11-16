@@ -50,6 +50,10 @@ class ConfocalScanThread(QtCore.QThread):
         # Galvo X waveform: "Ramp" (sawtooth) or "Sin"
         self.galvo_waveform = "Sin"
 
+        # Sin mode: scan the same line once more on the way back (return half)
+        # and add the two passes. Intensity scan only.
+        self.sin_return_scan = True
+
         # Piezo intensity scan
         # self.scan_time_pixel = int(self.dwell_time)*1000  # 10ms is better for piezo stage
         self.piezo_extra_gates = 10  # 原来 piezo 100 resolution 时 configure_scan 110
@@ -371,6 +375,15 @@ class ConfocalScanThread(QtCore.QThread):
                     self._setup_sin_x_scan(x_start, x_end)
                 )
 
+            # Return scan: every pixel gets two gates per line (forward + return),
+            # so the counter needs twice as many gates
+            return_scan = self.galvo_waveform == "Sin" and self.sin_return_scan
+            if return_scan:
+                self._hardware.counter.configure_scan(
+                    number_of_gates=int(2 * nx_pixel * ny_pixel),
+                    scan_method=1
+                )
+
             self._hardware.scanner.scanning_analog()
             self._hardware.counter.start_scan_measure()
 
@@ -399,6 +412,8 @@ class ConfocalScanThread(QtCore.QThread):
                     self._wait_pulser_finished()
 
                     self.ctsArr = self._hardware.counter.get_scan_data()
+                    if return_scan:
+                        self.ctsArr = self.add_return_scan(self.ctsArr, nx_pixel)
 
                 except Exception as e:
                     print(e, second_pos)
@@ -627,8 +642,9 @@ class ConfocalScanThread(QtCore.QThread):
         Returns pulse_seq_first, pulse_seq_normal, scan_freq_hz
         """
         durations_ns = self.sin_pixel_durations_ns(self.scan_dwell_time, self.resolution)
-        first, freq, _ = self.generate_time_by_duration_time(durations_ns, 0, pulse_seq)
-        normal, _, _ = self.generate_time_by_duration_time(durations_ns, 1, pulse_seq)
+        return_scan = self.sin_return_scan and pulse_seq is None  # intensity scan only
+        first, freq, _ = self.generate_time_by_duration_time(durations_ns, 0, pulse_seq, return_scan=return_scan)
+        normal, _, _ = self.generate_time_by_duration_time(durations_ns, 1, pulse_seq, return_scan=return_scan)
         self._hardware.scanner.scan_mode_sin_analog(float(x_start), float(x_end), freq)
         return first, normal, freq
 
@@ -652,7 +668,7 @@ class ConfocalScanThread(QtCore.QThread):
         return np.diff(np.round(edges * forward_ns)).astype(int).tolist()
 
     @classmethod
-    def generate_time_by_duration_time(cls, durations_ns, first_line=0, pulse_seq=None, gate_high_ratio=0.9):
+    def generate_time_by_duration_time(cls, durations_ns, first_line=0, pulse_seq=None, gate_high_ratio=0.9, return_scan=False):
         """
         Generate pulse sequence for a sine X scan from the time of each pixel.
 
@@ -660,6 +676,8 @@ class ConfocalScanThread(QtCore.QThread):
         first_line   : 0 for first line, 1 for normal line
         pulse_seq    : None for intensity scan (laser always on),
                        laser pulse dict for time scan (same as generate_time_sequence_by_dwell_ms)
+        return_scan  : False leaves the return (falling) half without gates,
+                       True scans the same line once more on the way back
 
         Forward scan = sum(durations_ns) = rising half of the sine.
         Flyback = falling half, same length, so one AWG period = 2 x forward.
@@ -683,7 +701,10 @@ class ConfocalScanThread(QtCore.QThread):
         for duration in durations_ns:
             lead_ns = (duration - gate_ns) // 2
             sig_seq += [(lead_ns, 0), (gate_ns, 1), (duration - gate_ns - lead_ns, 0)]
-        sig_seq = cls._normalize_segments(sig_seq + [(fly_back_ns, 0)])
+        # Return half: no gates, or the forward gates mirrored in time, because the
+        # mirror passes the same pixels in reverse order on the way back
+        return_seq = list(reversed(sig_seq[1:])) if return_scan else [(fly_back_ns, 0)]
+        sig_seq = cls._normalize_segments(sig_seq + return_seq)
 
         # Analog Channel 0: AOM voltage on during delay + one full line period
         aom_voltage_seq = [(delay_ns, 1.0), (line_period_ns, 1.0)]
@@ -710,6 +731,18 @@ class ConfocalScanThread(QtCore.QThread):
         # Channel 5: same as laser sequence, for Time Tagger lifetime start
         seq_list = [(0, laser_seq), (1, sig_seq), (5, list(laser_seq)), (6, awg_seq), (0, aom_voltage_seq)]
         return seq_list, scan_freq_hz, line_period_ns
+
+    @staticmethod
+    def add_return_scan(counts, nx):
+        """
+        Combine the two passes of a return scan.
+
+        The counter gives 2 * nx values per line: nx on the way forward (pixel 0 first),
+        then nx on the way back (pixel nx-1 first). Flip the return pass and add it
+        to the forward pass, so every line has nx values again.
+        """
+        counts = np.asarray(counts).reshape(-1, 2, nx)  # line, forward / return, pixel
+        return (counts[:, 0, :] + counts[:, 1, ::-1]).reshape(-1).tolist()
 
     @staticmethod
     def generate_intensity_sequence_by_dwell_ms(
