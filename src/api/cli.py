@@ -127,6 +127,13 @@ def _run(kind, params, args):
         print("[local] no service running, executing head-less")
         runner = JobRunner(executor=execute.execute)
         job = runner.submit(kind, params, out_dir=out_dir, dry_run=dry_run).to_dict()
+
+        if out_dir and not dry_run:
+            print(
+                "[stop] create %s to stop gracefully"
+                % os.path.join(out_dir, execute.STOP_FILENAME)
+            )
+
         job = _wait_local(runner, job["job_id"], args.timeout)
 
     if args.json:
@@ -134,7 +141,8 @@ def _run(kind, params, args):
     else:
         _summarise(job)
 
-    return 0 if job["state"] in ("done", "dry-run") else 1
+    # a run stopped through its STOP file is a completed request, not a failure
+    return 0 if job["state"] in ("done", "dry-run", "stopped") else 1
 
 
 # ------------------------------------------------------------------ commands
@@ -319,12 +327,47 @@ def cmd_result(args):
 
 def cmd_stop(args):
     client = find_service()
-    if client is None:
-        print("no service is running")
+
+    if client is not None and args.job:
+        client.stop(args.job)
+        print("stop requested for %s" % args.job)
+        return 0
+
+    from src.api import execute, history
+
+    # local runs are stopped by dropping a STOP file next to their output
+    if args.out:
+        if execute.request_stop_via_file(args.out):
+            print("STOP file created in %s" % args.out)
+            return 0
+        print("cannot create a STOP file in %s" % args.out)
         return 1
-    client.stop(args.job)
-    print("stop requested for %s" % args.job)
-    return 0
+
+    if not args.job:
+        print("give --job <id> or --out <run folder>")
+        return 1
+
+    job = history.get(args.job)
+
+    if job is None:
+        print("no job %s in the local history" % args.job)
+        return 1
+
+    if job.get("state") not in ("running", "queued"):
+        print("job %s is already %s" % (args.job, job.get("state")))
+        return 1
+
+    out_dir = job.get("out_dir") or ""
+
+    if execute.request_stop_via_file(out_dir):
+        print(
+            "STOP file created in %s (the scan stops after the current point)"
+            % out_dir
+        )
+        return 0
+
+    print("cannot create a STOP file in %s" % (out_dir or "<no output folder>"))
+    return 1
 
 
 def cmd_serve(args):
@@ -472,7 +515,10 @@ def build_parser():
     result.set_defaults(func=cmd_result)
 
     stop = sub.add_parser("stop", help="ask a running job to stop")
-    stop.add_argument("--job", required=True)
+    stop.add_argument("--job", default=None,
+                      help="job id from status / history")
+    stop.add_argument("--out", default=None,
+                      help="run output folder; a STOP file is created there")
     stop.set_defaults(func=cmd_stop)
 
     serve = sub.add_parser("serve", help="run the control service without a GUI")

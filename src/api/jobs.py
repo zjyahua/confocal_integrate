@@ -97,6 +97,9 @@ class JobRunner:
 
         data_job = is_data_kind(job.kind) and bool(job.out_dir)
 
+        # record the running state so status/stop can see the job from outside
+        self._record_history(job)
+
         if data_job:
             os.makedirs(job.out_dir, exist_ok=True)
 
@@ -142,7 +145,10 @@ class JobRunner:
 
             job.summary = result or {}
             job.files = sorted(os.listdir(job.out_dir)) if data_job else []
-            job.state = models.STATE_DONE
+            # a STOP file leaves the collected data in place but marks the run
+            job.state = (
+                models.STATE_STOPPED if job.stop_requested else models.STATE_DONE
+            )
 
         except Exception as exc:  # noqa: BLE001 - reported to the caller
             job.error = "%s: %s" % (type(exc).__name__, exc)

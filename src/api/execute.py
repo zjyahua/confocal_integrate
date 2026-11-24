@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -18,6 +19,83 @@ from src.api import render
 
 # job_id -> running scan thread, so /stop can interrupt it
 _RUNNING = {}
+
+STOP_FILENAME = "STOP"
+
+
+def stop_file_path(out_dir):
+    """<out_dir>/STOP is the request file watched while the job runs."""
+    return os.path.join(out_dir, STOP_FILENAME) if out_dir else None
+
+
+def request_stop_via_file(out_dir):
+    """Create the STOP file; the running job notices it and stops after a point."""
+    path = stop_file_path(out_dir)
+
+    if path is None or not os.path.isdir(out_dir):
+        return False
+
+    try:
+        with open(path, "a", encoding="utf-8"):
+            pass
+    except OSError:
+        return False
+
+    return True
+
+
+def _start_stop_watcher(job, get_thread, interval_s=0.2):
+    """
+    Watch <out_dir>/STOP and stop the running thread when it appears.
+
+    Returns a callable that must be called when the job is over; it stops the
+    watcher so no thread is left behind.
+    """
+    path = stop_file_path(job.out_dir)
+
+    if path is None:
+        return lambda: None
+
+    # a stale file from an earlier run must not stop this one immediately
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+    done = threading.Event()
+
+    def watch():
+        while not done.wait(interval_s):
+            if not os.path.exists(path):
+                continue
+
+            thread = get_thread()
+
+            if thread is not None:
+                try:
+                    thread.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            job.stop_requested = True
+            print("[stop] STOP file found, stopping after the current point")
+
+            try:
+                from src.api import logs
+
+                logs.write(job.kind, "STOP requested via STOP file", {"job": job.job_id})
+            except Exception:  # noqa: BLE001
+                pass
+
+            break
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+
+    return done.set
+
+
 
 
 def request_stop(job_id):
@@ -247,12 +325,22 @@ def run_confocal_scan(job):
         thread.data_update.connect(_write_live)
 
         _RUNNING[job.job_id] = thread
-        started = time.time()
-        thread.run()                     # blocks until the scan is finished
-        elapsed = time.time() - started
+        stop_watcher_done = _start_stop_watcher(job, lambda: thread)
+        stopped = False
 
-        if job.stop_requested:
-            raise RuntimeError("scan stopped by request")
+        started = time.time()
+
+        try:
+            thread.run()                 # blocks until the scan is finished
+        finally:
+            stop_watcher_done()
+
+        elapsed = time.time() - started
+        stopped = bool(job.stop_requested)
+
+        if stopped:
+            print("[stop] confocal scan stopped after %d lines" % (data_thread.map.shape[0] if data_thread.map is not None else 0))
+
         if errors:
             raise RuntimeError("; ".join(errors))
         if data_thread.map is None:
@@ -275,7 +363,10 @@ def run_confocal_scan(job):
             )
         )
 
-        return _summary_of(map2d, params, elapsed)
+        summary = _summary_of(map2d, params, elapsed)
+        summary["stopped"] = stopped
+
+        return summary
 
     finally:
         _RUNNING.pop(job.job_id, None)
@@ -353,8 +444,12 @@ def _write_gate_raw(path, raw, valid, x_name):
 
     rows = []
 
+    # only loops that actually ran, and only the points that were measured
     for loop_idx in range(data.shape[0]):
         for point_idx in range(data.shape[1]):
+            if not mask[loop_idx, point_idx]:
+                continue
+
             sig_v, ref_v, x_v = data[loop_idx, point_idx, 0:3]
             rows.append(
                 (
@@ -652,12 +747,22 @@ def run_point_scan(job):
             )
 
         _RUNNING[job.job_id] = thread
-        started = time.time()
-        thread.run()                     # blocks until the sweep is finished
-        elapsed = time.time() - started
+        stop_watcher_done = _start_stop_watcher(job, lambda: thread)
+        stopped = False
 
-        if job.stop_requested:
-            raise RuntimeError("scan stopped by request")
+        started = time.time()
+
+        try:
+            thread.run()                 # blocks until the sweep is finished
+        finally:
+            stop_watcher_done()
+
+        elapsed = time.time() - started
+        stopped = bool(job.stop_requested)
+
+        if stopped:
+            print("[stop] point scan stopped, keeping the loops that finished")
+
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -670,6 +775,7 @@ def run_point_scan(job):
             "sequence": params.get("sequence"),
             "elapsed_s": round(elapsed, 2),
             "auto_track": auto_track,
+            "stopped": stopped,
         }
 
         if auto_track:
@@ -912,12 +1018,23 @@ def run_track(job):
         thread.error.connect(errors.append)
 
         _RUNNING[job.job_id] = thread
-        started = time.time()
-        thread.run()                     # blocks until X, Y and Z are done
-        elapsed = time.time() - started
+        stop_watcher_done = _start_stop_watcher(job, lambda: thread)
+        stopped = False
 
-        if job.stop_requested:
-            raise RuntimeError("tracking stopped by request")
+        started = time.time()
+
+        try:
+            thread.run()                 # blocks until X, Y and Z are done
+        finally:
+            stop_watcher_done()
+
+        elapsed = time.time() - started
+        stopped = bool(job.stop_requested)
+
+        if stopped and "data" not in collected:
+            print("[stop] tracking stopped before it finished")
+            return {"stopped": True, "step_v": step_v, "z_step_um": z_step}
+
         if errors:
             raise RuntimeError("; ".join(errors))
         if "data" not in collected:
@@ -946,6 +1063,7 @@ def run_track(job):
             "max_counts": [int(max(c)) for c in cts_list],
             "elapsed_s": round(elapsed, 2),
             "laser_switched_on": laser_on,
+            "stopped": stopped,
         }
 
     finally:

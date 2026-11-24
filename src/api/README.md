@@ -114,6 +114,27 @@ python -m src.api.cli point --mode time --count-mode Gate \
 拟合失败不会让扫描失败：结果里会写 `"fit": {ok: false, error: ...}`。
 成功时写 `fit.png`（数据 + 拟合曲线 + 参数框）和 `summary.json` 的 `fit` 段。
 
+## 中途停止（STOP 文件）
+
+长实验想停下来时，不需要杀进程（那会丢掉内存里的数据）：
+
+```bash
+# 用任务 id（本地历史里能查到）
+python -m src.api.cli stop --job <job_id>
+
+# 或者直接指定运行的输出目录
+python -m src.api.cli stop --out "C:/zjh/experiment data/<日期>/point/<时间戳>"
+
+# 等价于手动创建
+#   <out_dir>/STOP
+```
+
+- 扫描线程在每个点（或每条扫描线）之间检查 STOP，**当前点结束后**停下
+- 状态记为 `stopped`，退出码 0（是正常请求，不是失败）
+- **已完成 loop 的数据照常保存**：`raw.txt` / `average.txt` / `sweep.png` /
+  `fit.png`；`summary.json` 里 `"stopped": true`
+- 没有数据可写的阶段（例如 track 一开始就停）只会写 `{"stopped": true}`
+
 ## 本地任务历史
 
 没有控制服务时，`status` / `result` 读仓库根目录的 `.api_jobs.json`（已 gitignore，
