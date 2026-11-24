@@ -35,10 +35,29 @@ class JobRunner:
         with self._lock:
             self._jobs[job.job_id] = job
 
+        self._record_history(job)
+
         thread = threading.Thread(target=self._execute, args=(job,), daemon=True)
         self._threads[job.job_id] = thread
         thread.start()
         return job
+
+    @staticmethod
+    def _record_history(job):
+        """Keep a copy on disk so status/result work without a service."""
+        try:
+            from src.api import history
+
+            data = job.to_dict()
+
+            # summary.json is written after job.files was captured, so list the
+            # directory again here
+            if job.out_dir and os.path.isdir(job.out_dir):
+                data["files"] = sorted(os.listdir(job.out_dir))
+
+            history.record(data)
+        except Exception as exc:  # noqa: BLE001 - history must never break a run
+            print("local job history failed: %s" % exc)
 
     def get(self, job_id):
         with self._lock:
@@ -108,6 +127,7 @@ class JobRunner:
         finally:
             job.finished = time.time()
             self._write(job, "summary.json", job.summary or {"error": job.error})
+            self._record_history(job)
 
     @staticmethod
     def _write(job, name, payload):

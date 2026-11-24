@@ -53,3 +53,6 @@ desktop.ini
 .api_token
 .api_port
 experiments/
+
+# local job history
+.api_jobs.json

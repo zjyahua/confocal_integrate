@@ -71,6 +71,19 @@ def _summarise(job):
                "-" if progress.get("eta_s") is None
                else "%.1f s" % progress["eta_s"])
         )
+    summary = job.get("summary") or {}
+    if isinstance(summary, dict) and summary and job.get("state") not in ("dry-run", None):
+        print("summary   :")
+        for key, value in summary.items():
+            if isinstance(value, (int, float, str, bool)):
+                print("   %-18s %s" % (key, value))
+
+    files = job.get("files") or []
+    if files:
+        print("files     :")
+        for name in files:
+            print("   %s" % name)
+
     if job.get("out_dir"):
         print("out_dir   : %s" % job["out_dir"])
 
@@ -207,16 +220,58 @@ def cmd_status(args):
                     job["job_id"], job["state"], job["kind"], job.get("out_dir", "")))
         return 0
 
-    print("no service is running (start it with: python -m src.api.cli serve)")
-    return 1
+    from src.api import history
+
+    if args.job:
+        job = history.get(args.job)
+
+        if job is None:
+            print("no job %s in the local history" % args.job)
+            return 1
+
+        _print_json(job) if args.json else _summarise(job)
+        return 0
+
+    jobs = history.recent(args.limit)
+
+    if not jobs:
+        print("no local jobs yet (and no control service is running)")
+        return 1
+
+    for job in jobs:
+        print("%-28s %-8s %-14s %s" % (
+            job.get("job_id"), job.get("state"), job.get("kind"),
+            job.get("out_dir", "")))
+
+    return 0
 
 
 def cmd_result(args):
     client = find_service()
-    if client is None:
-        print("no service is running")
-        return 1
-    result = client.result(args.job)
+
+    if client is not None:
+        result = client.result(args.job)
+    else:
+        from src.api import history
+
+        job = history.get(args.job)
+
+        if job is None:
+            print("no job %s in the local history" % args.job)
+            return 1
+
+        result = dict(job)
+        out_dir = result.get("out_dir") or ""
+        files = []
+
+        if out_dir and os.path.isdir(out_dir):
+            files = [
+                os.path.join(out_dir, name)
+                for name in sorted(os.listdir(out_dir))
+            ]
+
+        result["files"] = files
+
     _print_json(result) if args.json else _summarise(result)
     return 0
 

@@ -77,6 +77,20 @@ python -m src.api.cli demo --out experiments/demo
 
 `--json` 输出机器可读结果，便于 agent 解析。
 
+## 本地任务历史
+
+没有控制服务时，`status` / `result` 读仓库根目录的 `.api_jobs.json`（已 gitignore，
+保留最近 50 条），所以 CLI 前台跑完的任务也能查：
+
+```bash
+python -m src.api.cli status                  # 最近的本地任务
+python -m src.api.cli status --job <job_id>   # 单个任务：summary + 文件列表
+python -m src.api.cli result --job <job_id>   # 文件绝对路径
+```
+
+有服务在跑时优先用服务的任务表；`stop` 仍然只支持服务模式（本地任务就在当前
+进程里前台运行）。
+
 ## 实时进度（live view）
 
 扫描运行期间，输出目录里会不断刷新两个文件：
@@ -180,6 +194,7 @@ def _call_on_gui_thread(self, fn):
 - ✅ `execute`：**track** 已接真机（`MaxThread`，X/Y 用振镜或位移台、Z 用位移台），
   输出 `track.png`（三轴曲线，标注起点/终点）/ `summary.json`（origin、final、峰值）
 - ✅ `track` 支持 `--laser-on`：运行期间打开激光，结束后恢复（不给就要求激光已开）
+- ✅ **本地任务历史**：`.api_jobs.json` 记录每个 job，无服务时 `status` / `result` 可用
 - ✅ **实时进度**：点测量与共聚焦扫描运行期间每隔 `--live-interval` 秒刷新
   `live.png` / `live.json`，并打印 `[live]` 进度行（含 ETA）
 - ✅ **点测量 + 自动追踪**：`--auto-track --track-threshold N`，ref 低于阈值时
