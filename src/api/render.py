@@ -78,11 +78,24 @@ def render_sweep(
     return _save(fig, path)
 
 
-def render_histogram(counts, path="hist.png", title="", xlabel="time (ns)"):
-    """Histogram / FLIM trace of a single pixel."""
+def render_histogram(counts, path="hist.png", title="", xlabel="time (ns)", x=None):
+    """Histogram / FLIM trace of a single pixel (x is the time axis in ns)."""
     counts = np.asarray(counts, dtype=float)
+
+    if x is None:
+        x = np.arange(counts.size)
+    else:
+        x = np.asarray(x, dtype=float)
+
     fig, ax = plt.subplots(figsize=STYLE["figsize"])
-    ax.bar(np.arange(counts.size), counts, width=1.0)
+
+    # same style as the GUI histogram window: a line through the data points,
+    # not a filled bar chart (bars hide the shape and look like a solid block)
+    if counts.size <= 200:
+        ax.plot(x, counts, "o-", ms=3.5, lw=1.0)
+    else:
+        ax.plot(x, counts, ".-", ms=2.0, lw=0.6)
+
     ax.set_title(title or "histogram")
     ax.set_xlabel(xlabel)
     ax.set_ylabel("counts")

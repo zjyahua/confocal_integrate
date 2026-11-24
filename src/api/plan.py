@@ -25,6 +25,7 @@ LIMITS = {
     "max_dwell_ms": 5.0,
     "max_resolution": 500,
     "max_point_num": 2000,
+    "max_bin_num": 100000,
     "max_loops": 1000,
     "max_average": 500000,
     "max_seconds": 3600.0,
@@ -293,8 +294,8 @@ def plan_point(params):
     if count_mode == "Histogram":
         if bin_width <= 0:
             errors.append("bin_width must be positive")
-        if not 1 <= bin_num <= LIMITS["max_point_num"]:
-            errors.append("bin_num outside [1, %d]" % LIMITS["max_point_num"])
+        if not 1 <= bin_num <= LIMITS["max_bin_num"]:
+            errors.append("bin_num outside [1, %d]" % LIMITS["max_bin_num"])
 
     # auto tracking: the scan thread asks for a tracking run when the
     # reference counts fall below the threshold

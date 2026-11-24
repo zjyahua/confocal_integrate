@@ -662,6 +662,7 @@ def run_point_scan(job):
                         payload.get("y", []),
                         os.path.join(job.out_dir, "live.png"),
                         title="live histogram",
+                        x=payload.get("x"),
                     )
                 else:
                     render.render_sweep(
@@ -810,6 +811,7 @@ def run_point_scan(job):
                     counts,
                     os.path.join(job.out_dir, "histogram.png"),
                     title="time histogram",
+                    x=x,
                 )
             )
             files.append(
