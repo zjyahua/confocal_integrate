@@ -23,13 +23,16 @@ import time
 from src.api import execute, render
 from src.api.client import find_service
 from src.api.jobs import JobRunner
-from src.api.paths import default_out_dir
+from src.api.paths import DATA_KINDS, default_out_dir, day_dir, is_data_kind
+
+# fallback only: every point experiment should name its sequence explicitly
+DEFAULT_SEQUENCE = "rabi/Rabi_130ns.txt"
 from src.api.server import REPO_ROOT, start_service, stop_service
 
 
 # --------------------------------------------------------------------- utils
-def _default_out_dir():
-    return default_out_dir()
+def _default_out_dir(kind):
+    return default_out_dir(kind) if is_data_kind(kind) else ""
 
 
 def _print_json(payload):
@@ -112,7 +115,7 @@ def _run(kind, params, args):
     """Send the job to the service when it exists, otherwise run locally."""
     client = find_service()
     dry_run = bool(args.dry_run)
-    out_dir = args.out or _default_out_dir()
+    out_dir = args.out or _default_out_dir(kind)
 
     if client is not None:
         health = client.health()
@@ -187,11 +190,17 @@ def cmd_point(args):
         if args.track_z_step is not None:
             params["track_z_step"] = args.track_z_step
 
+        if args.track_threshold_from_first_loop:
+            params["track_threshold_from_first_loop"] = True
+
         if args.track_continue_on_failure:
             params["track_stop_on_failure"] = False
 
-    if args.sequence:
-        params["sequence"] = args.sequence
+    sequence = args.sequence or DEFAULT_SEQUENCE
+    params["sequence"] = sequence
+
+    if args.sequence is None:
+        params["sequence_is_default"] = True
 
     if args.fit and args.fit != "none":
         params["fit"] = args.fit
@@ -334,7 +343,7 @@ def cmd_serve(args):
 
 
 def cmd_demo(args):
-    out_dir = args.out or _default_out_dir()
+    out_dir = args.out or os.path.join(day_dir(), "logs", "demo")
     files = render.demo(out_dir)
     print(json.dumps({"out_dir": out_dir, "files": files}, indent=2))
     return 0
@@ -396,6 +405,8 @@ def build_parser():
                        help="run a tracking search when ref drops below the threshold")
     point.add_argument("--track-threshold", type=int, default=None,
                        help="ref counts that trigger tracking (required with --auto-track)")
+    point.add_argument("--track-threshold-from-first-loop", action="store_true",
+                       help="derive the threshold as 0.9 x min(ref) of the first loop")
     point.add_argument("--track-step", type=float, default=None,
                        help="galvo step for the tracking search in V (default 0.0025)")
     point.add_argument("--track-z-step", type=float, default=None,
@@ -411,7 +422,9 @@ def build_parser():
                        default="ratio", help="which curve to fit")
     point.add_argument("--fit-peaks", type=int, default=None,
                        help="Lorentzian: keep only the N strongest peaks")
-    point.add_argument("--sequence", default="rabi/Rabi_130ns.txt")
+    point.add_argument("--sequence", default=None,
+                       help="pulse sequence file; ask the user which one, the "
+                            "default rabi/Rabi_130ns.txt is only a fallback")
     common(point)
     point.set_defaults(func=cmd_point)
 

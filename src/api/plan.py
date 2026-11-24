@@ -313,13 +313,15 @@ def plan_point(params):
             % fit_kind
         )
 
+    learn_threshold = bool(params.get("track_threshold_from_first_loop"))
+
     if auto_track:
-        if track_threshold is None:
+        if track_threshold is None and not learn_threshold:
             errors.append(
-                "auto_track needs track_threshold (ref counts below it start "
-                "a tracking run)"
+                "auto_track needs track_threshold (ref counts below it start a "
+                "tracking run), or track_threshold_from_first_loop"
             )
-        elif int(track_threshold) <= 0:
+        elif track_threshold is not None and int(track_threshold) <= 0:
             errors.append("track_threshold must be positive")
 
         if track_step <= 0:
@@ -356,6 +358,15 @@ def plan_point(params):
         )
 
     sequence_path = resolve_sequence(params.get("sequence"))
+
+    if params.get("sequence_is_default"):
+        plan_sequence_warning = (
+            "no --sequence given, the CLI fell back to rabi/Rabi_130ns.txt; "
+            "confirm this is the sequence you want"
+        )
+    else:
+        plan_sequence_warning = None
+
     pulse_seq = load_pulse_seq(sequence_path)
 
     # Gate mode runs one sequence per point, so for a time sweep evaluate the
@@ -386,15 +397,31 @@ def plan_point(params):
                 "count_mode=Histogram for a sequence with an empty Ref)"
             )
 
-        return _finish(
-            {"errors": ["sequence cannot be used in %s mode: %s%s" % (count_mode, exc, hint)]}
-        )
+        errors = ["sequence cannot be used in %s mode: %s%s" % (count_mode, exc, hint)]
+
+        if plan_sequence_warning:
+            errors.append(plan_sequence_warning)
+
+        return _finish({"errors": errors})
 
     pulse_period_ns = int(float(working["Sum"][0]))
 
     if count_mode == "Histogram":
         # one histogram per loop, no per point sweep
         per_loop_s = average * pulse_period_ns / 1e9 + 0.15
+        estimate_s = loops * per_loop_s
+    elif mode == "time":
+        # the pulse period grows with t, so sum over the real sweep instead of
+        # assuming every point is as slow as the longest one
+        period_sum_ns = 0.0
+
+        for time_ns in sweep:
+            point_seq = SinglePointscanThread.update_time_to_seq(
+                pulse_seq, int(time_ns)
+            )
+            period_sum_ns += float(int(float(point_seq["Sum"][0])))
+
+        per_loop_s = average * period_sum_ns / 1e9 + 0.1 * point_num
         estimate_s = loops * per_loop_s
     else:
         per_point_s = average * pulse_period_ns / 1e9 + 0.1
@@ -434,12 +461,20 @@ def plan_point(params):
 
     if auto_track:
         plan["auto_track"] = True
-        plan["track_threshold"] = int(track_threshold)
+
+        if learn_threshold:
+            plan["track_threshold_from_first_loop"] = True
+            plan["track_threshold_rule"] = "0.9 x min(ref) of loop 1"
+        else:
+            plan["track_threshold"] = int(track_threshold)
         plan["track_step_v"] = track_step
         plan["track_z_step_um"] = track_z_step
         plan["track_integral_ms"] = track_integral_ms
         # one tracking run per trigger, roughly
         plan["estimate_s"] = round(plan["estimate_s"] + 12.0, 1)
+
+    if plan_sequence_warning:
+        plan.setdefault("warnings", []).append(plan_sequence_warning)
 
     if count_mode == "Gate" and "Ref" in pulse_seq:
         ref = [float(v) for v in pulse_seq["Ref"]]

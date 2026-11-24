@@ -7,8 +7,8 @@ import os
 import threading
 import time
 
-from src.api import models
-from src.api.paths import default_out_dir
+from src.api import logs, models
+from src.api.paths import default_out_dir, is_data_kind
 from src.api.plan import build_plan
 
 
@@ -29,11 +29,20 @@ class JobRunner:
 
     # ------------------------------------------------------------------ api
     def submit(self, kind, params, out_dir=None, dry_run=False):
-        out_dir = out_dir or default_out_dir()
+        if out_dir is None:
+            out_dir = default_out_dir(kind) if is_data_kind(kind) else ""
+
         job = models.new_job(kind, params, out_dir, dry_run=dry_run)
 
         with self._lock:
             self._jobs[job.job_id] = job
+
+        logs.write(
+            kind,
+            "START %s job=%s dry_run=%s out=%s"
+            % (kind, job.job_id, dry_run, out_dir or "-"),
+            params,
+        )
 
         self._record_history(job)
 
@@ -85,21 +94,35 @@ class JobRunner:
     def _execute(self, job):
         job.state = models.STATE_RUNNING
         job.started = time.time()
-        os.makedirs(job.out_dir, exist_ok=True)
+
+        data_job = is_data_kind(job.kind) and bool(job.out_dir)
+
+        if data_job:
+            os.makedirs(job.out_dir, exist_ok=True)
 
         try:
-            self._write(job, "params.json", job.params)
+            if data_job:
+                self._write(job, "params.json", job.params)
 
             plan = build_plan(job.kind, job.params)
             job.progress = {"phase": "plan", "plan": plan}
-            self._write(job, "plan.json", plan)
+
+            if data_job:
+                self._write(job, "plan.json", plan)
+
+            logs.write(
+                job.kind,
+                "PLAN %s job=%s ok=%s estimate=%ss"
+                % (job.kind, job.job_id, plan.get("ok"), plan.get("estimate_s")),
+                plan.get("warnings") or None,
+            )
 
             if not plan["ok"]:
                 raise ValueError("; ".join(plan["errors"]))
 
             if job.dry_run:
                 job.summary = plan
-                job.files = ["params.json", "plan.json"]
+                job.files = ["params.json", "plan.json"] if data_job else []
                 job.state = models.STATE_DRY
                 return
 
@@ -118,7 +141,7 @@ class JobRunner:
                 self.hardware_lock.release()
 
             job.summary = result or {}
-            job.files = sorted(os.listdir(job.out_dir))
+            job.files = sorted(os.listdir(job.out_dir)) if data_job else []
             job.state = models.STATE_DONE
 
         except Exception as exc:  # noqa: BLE001 - reported to the caller
@@ -126,7 +149,23 @@ class JobRunner:
             job.state = models.STATE_STOPPED if job.stop_requested else models.STATE_FAILED
         finally:
             job.finished = time.time()
-            self._write(job, "summary.json", job.summary or {"error": job.error})
+
+            if data_job:
+                self._write(job, "summary.json", job.summary or {"error": job.error})
+
+            logs.write(
+                job.kind,
+                "END %s job=%s state=%s elapsed=%.1fs%s"
+                % (
+                    job.kind,
+                    job.job_id,
+                    job.state,
+                    job.elapsed,
+                    (" error=" + job.error) if job.error else "",
+                ),
+                job.summary or None,
+            )
+
             self._record_history(job)
 
     @staticmethod

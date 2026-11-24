@@ -31,6 +31,9 @@ class SinglePointscanThread(QtCore.QThread):
 
         # track
         self.threshold = None
+        # learn the threshold from the first loop instead of using a fixed one
+        self.auto_track_learn_first_loop = False
+        self._first_loop_refs = []
 
         # Time histogram scan
         self.bin_width = 50  # ps
@@ -69,6 +72,7 @@ class SinglePointscanThread(QtCore.QThread):
         freq_sweep_arr = None,
         threshold = None,
         auto_track_enabled=None,
+        auto_track_learn_first_loop=None,
     ):
         if scan_type is not None:
             self.scan_type = scan_type
@@ -99,6 +103,9 @@ class SinglePointscanThread(QtCore.QThread):
 
         if threshold is not None:
             self.threshold = int(threshold)
+
+        if auto_track_learn_first_loop is not None:
+            self.auto_track_learn_first_loop = bool(auto_track_learn_first_loop)
 
         if auto_track_enabled is not None:
             self.auto_track_enabled = bool(auto_track_enabled)
@@ -269,6 +276,8 @@ class SinglePointscanThread(QtCore.QThread):
                 self.average_num
             )
 
+            self._first_loop_refs = []
+
             print("Start frequency scan")
             time.sleep(1)
 
@@ -373,15 +382,22 @@ class SinglePointscanThread(QtCore.QThread):
                     if expected and filled:
                         ref_for_track = int(round(ref * expected / filled))
 
-                    keep_scanning = self._auto_track_if_needed_after_scan_point(
-                        ref_for_track
-                    )
+                    if self.auto_track_learn_first_loop and loop_idx == 0:
+                        # the first loop only defines the threshold
+                        self._first_loop_refs.append(int(ref_for_track))
+                    else:
+                        keep_scanning = self._auto_track_if_needed_after_scan_point(
+                            ref_for_track
+                        )
 
-                    if not keep_scanning:
-                        break
+                        if not keep_scanning:
+                            break
 
                     if hasattr(self._hardware.counter, "gate_recount"):
                         self._hardware.counter.gate_recount()
+
+                if self.auto_track_learn_first_loop and loop_idx == 0:
+                    self._learn_tracking_threshold()
 
         finally:
             self._cleanup_frequency_scan()
@@ -399,6 +415,22 @@ class SinglePointscanThread(QtCore.QThread):
         """
         self._hardware.pulser.trigger_mode()
         self._hardware.pulser.upload_seq_list(seq, average_num)
+
+    def _learn_tracking_threshold(self):
+        """Set the tracking threshold to 0.9 x the first loop's minimum ref."""
+        if not self._first_loop_refs:
+            return
+
+        reference = min(self._first_loop_refs)
+        self.threshold = max(1, int(0.9 * reference))
+
+        print(
+            "[auto track] threshold from loop 1: min ref=%d -> %d"
+            % (reference, self.threshold)
+        )
+        self.status_update.emit(
+            "Auto track threshold from loop 1: %d" % self.threshold
+        )
 
     def _auto_track_if_needed_after_scan_point(self, ref, pulse_seq=None):
         """
@@ -570,6 +602,8 @@ class SinglePointscanThread(QtCore.QThread):
             self._hardware.counter.start_gate_measure()
             self._hardware.pulser.trigger_mode()
 
+            self._first_loop_refs = []
+
             print("Start time scan")
             time.sleep(1)
 
@@ -727,16 +761,23 @@ class SinglePointscanThread(QtCore.QThread):
                     if expected and filled:
                         ref_for_track = int(round(ref * expected / filled))
 
-                    keep_scanning = self._auto_track_if_needed_after_scan_point(
-                        ref_for_track, pulse_seq=self.pulse_seq_time
-                    )
-                    if not keep_scanning:
-                        break
+                    if self.auto_track_learn_first_loop and loop_idx == 0:
+                        # the first loop only defines the threshold
+                        self._first_loop_refs.append(int(ref_for_track))
+                    else:
+                        keep_scanning = self._auto_track_if_needed_after_scan_point(
+                            ref_for_track, pulse_seq=self.pulse_seq_time
+                        )
+                        if not keep_scanning:
+                            break
 
                     if hasattr(self._hardware.counter, "gate_recount"):
                         self._hardware.counter.gate_recount()
 
                     time.sleep(0.1)
+
+                if self.auto_track_learn_first_loop and loop_idx == 0:
+                    self._learn_tracking_threshold()
 
         finally:
             self._cleanup_time_scan()

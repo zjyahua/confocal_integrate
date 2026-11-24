@@ -29,6 +29,13 @@ def request_stop(job_id):
     return True
 
 
+def _plot_xscale(mode, params):
+    """A log x axis for time scans that were sampled exponentially."""
+    if mode == "time" and params.get("time_scale") == "Exponential":
+        return "log"
+    return "linear"
+
+
 def execute(job):
     """Entry point used by JobRunner."""
     if job.kind == "confocal_scan":
@@ -339,6 +346,63 @@ def _run_max_track(hardware, step_v=None, z_step=None, integral_ms=200):
     }
 
 
+def _write_gate_raw(path, raw, valid, x_name):
+    """One row per loop and point, exactly as the DataThread stored it."""
+    data = np.asarray(raw, dtype=float)
+    mask = np.asarray(valid, dtype=bool)
+
+    rows = []
+
+    for loop_idx in range(data.shape[0]):
+        for point_idx in range(data.shape[1]):
+            sig_v, ref_v, x_v = data[loop_idx, point_idx, 0:3]
+            rows.append(
+                (
+                    loop_idx + 1,
+                    point_idx + 1,
+                    x_v,
+                    sig_v,
+                    ref_v,
+                    int(mask[loop_idx, point_idx]),
+                )
+            )
+
+    np.savetxt(
+        path,
+        np.asarray(rows, dtype=float),
+        header="loop\tpoint\t%s\tsig\tref\tvalid" % x_name,
+        fmt="%d\t%d\t%.6g\t%.6g\t%.6g\t%d",
+        comments="",
+    )
+    return path
+
+
+def _write_histogram_raw(path, raw, valid):
+    """One row per loop and bin."""
+    data = np.asarray(raw, dtype=float)
+    mask = np.asarray(valid, dtype=bool)
+
+    rows = []
+
+    for loop_idx in range(data.shape[0]):
+        if not mask[loop_idx]:
+            continue
+
+        for bin_idx in range(data.shape[1]):
+            counts_v = data[loop_idx, bin_idx, 0]
+            time_v = data[loop_idx, bin_idx, 1]
+            rows.append((loop_idx + 1, bin_idx + 1, time_v, counts_v))
+
+    np.savetxt(
+        path,
+        np.asarray(rows if rows else [(0, 0, 0.0, 0.0)], dtype=float),
+        header="loop\tbin\ttime_ns\tcounts",
+        fmt="%d\t%d\t%.6g\t%.6g",
+        comments="",
+    )
+    return path
+
+
 def run_point_scan(job):
     """
     Single point sweep: frequency (ODMR) or time (Rabi / T1) in Gate mode, or
@@ -402,6 +466,7 @@ def run_point_scan(job):
         hardware.mw_source.set_frequency(float(frequency))
 
     auto_track = bool(params.get("auto_track", False))
+    learn_threshold = bool(params.get("track_threshold_from_first_loop"))
     track_events = []
 
     if auto_track:
@@ -429,6 +494,7 @@ def run_point_scan(job):
             freq_sweep_arr=freq_sweep,
             threshold=params.get("track_threshold"),
             auto_track_enabled=auto_track,
+            auto_track_learn_first_loop=learn_threshold,
         )
 
         thread.stop_on_track_failure = bool(
@@ -511,6 +577,7 @@ def run_point_scan(job):
                         title="live %s scan" % ("frequency" if mode == "freq" else "time"),
                         xlabel="Frequency (MHz)" if mode == "freq" else "Time (ns)",
                         ylabel="Counts",
+                        xscale=_plot_xscale(mode, params),
                     )
             except Exception as exc:  # noqa: BLE001 - live view is best effort
                 print("[live] render failed: %s" % exc)
@@ -569,6 +636,15 @@ def run_point_scan(job):
                 track_events.append(dict(ok=ok, **info))
                 print("[auto track] %s" % ("finished" if ok else "failed"))
 
+                from src.api import logs
+
+                logs.write(
+                    "point_scan",
+                    "AUTO TRACK %s loop/point=%s"
+                    % ("ok" if ok else "failed", message),
+                    info or None,
+                )
+
                 thread.notify_tracking_finished(ok)
 
             thread.track_update.connect(
@@ -598,6 +674,10 @@ def run_point_scan(job):
 
         if auto_track:
             summary["track_events"] = track_events
+            summary["learned_track_threshold"] = thread.threshold
+
+            if learn_threshold and thread.threshold is not None:
+                print("[auto track] learned threshold: %d" % thread.threshold)
 
         if count_mode == "Histogram":
             raw = data_thread.raw_histogram
@@ -627,8 +707,15 @@ def run_point_scan(job):
                 )
             )
             files.append(
-                _write_table(
+                _write_histogram_raw(
                     os.path.join(job.out_dir, "raw.txt"),
+                    raw,
+                    data_thread.histogram_loop_valid,
+                )
+            )
+            files.append(
+                _write_table(
+                    os.path.join(job.out_dir, "average.txt"),
                     [x, counts],
                     ["time_ns", "counts"],
                 )
@@ -711,6 +798,7 @@ def run_point_scan(job):
                             title="%s fit (%s)" % (fit_kind, column),
                             xlabel=x_label,
                             annotation=fitting.describe(fit_result),
+                            xscale=_plot_xscale(mode, params),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - a failed fit is not fatal
@@ -729,11 +817,20 @@ def run_point_scan(job):
                     title="%s %s" % (mode, count_mode),
                     xlabel=x_label,
                     ylabel="Counts",
+                    xscale=_plot_xscale(mode, params),
+                )
+            )
+            files.append(
+                _write_gate_raw(
+                    os.path.join(job.out_dir, "raw.txt"),
+                    raw,
+                    valid,
+                    x_name,
                 )
             )
             files.append(
                 _write_table(
-                    os.path.join(job.out_dir, "raw.txt"),
+                    os.path.join(job.out_dir, "average.txt"),
                     [x, sig_ave, ref_ave],
                     [x_name, "sig", "ref"],
                 )

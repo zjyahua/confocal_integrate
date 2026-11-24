@@ -148,16 +148,44 @@ live.json   { phase, loop, loop_num, point, point_num, elapsed_s, eta_s }
 
 ## 输出位置
 
-默认写到 **`C:/zjh/experiment data/<YYYY.MM.DD>/api/<时间戳>/`**，不再放在代码目录里。
+每天一个文件夹，**只有四类顶层目录**，不再每次调用都堆一个新文件夹：
+
+```
+C:/zjh/experiment data/<YYYY.MM.DD>/
+├── logs/            每个类别一个带时间戳的日志文件
+│   ├── scan.log     START / PLAN / END + 参数和结果摘要
+│   ├── track.log
+│   ├── point.log
+│   └── misc.log     goto / where / demo
+├── scan/            共聚焦扫描，每次运行一个子文件夹
+├── track/           追踪，每次运行一个子文件夹
+└── point/           单点实验，每次运行一个子文件夹
+```
+
+`goto` / `where` / `demo` **不创建数据文件夹**，只写日志。
+
 用 `CONFOCAL_DATA_ROOT` 环境变量可以改根目录，`--out` 可以指定具体目录。
+
+每次运行的子文件夹：
 
 ```
 <out_dir>/
 ├── params.json     提交时的参数快照
 ├── plan.json       校验与规划结果（段数、耗时估计）
 ├── summary.json    结束时的摘要（拟合参数/错误）
-└── (真实扫描后) raw.txt / image.png / live.png
+├── raw.txt         逐 loop 原始数据
+├── average.txt     各 loop 平均后的曲线（画图/拟合用）
+├── image.png / sweep.png / histogram.png / fit.png / track.png
+└── live.png / live.json（运行中的实时快照）
 ```
+
+`raw.txt` 的列（和 DataThread 的存储一致）：
+
+| 实验 | 列 |
+| --- | --- |
+| Gate（freq/time） | `loop  point  <freq_mhz/time_ns>  sig  ref  valid` |
+| Histogram | `loop  bin  time_ns  counts` |
+| 共聚焦扫描 | `x  y  counts`（单次扫描，没有 loop） |
 
 ## HTTP 契约
 

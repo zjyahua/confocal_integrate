@@ -51,7 +51,9 @@ def render_map(map2d, path, title="", xlabel="x", ylabel="y", unit="", extent=No
     return _save(fig, path)
 
 
-def render_sweep(x, sig, ref=None, path="sweep.png", title="", xlabel="", ylabel=""):
+def render_sweep(
+    x, sig, ref=None, path="sweep.png", title="", xlabel="", ylabel="", xscale="linear"
+):
     """Point measurement: signal (and optionally reference) versus the sweep."""
     x = np.asarray(x, dtype=float)
     sig = np.asarray(sig, dtype=float)
@@ -67,6 +69,7 @@ def render_sweep(x, sig, ref=None, path="sweep.png", title="", xlabel="", ylabel
             ax2.plot(x, sig / ref, "-", lw=1.6, color="tab:red", label="sig/ref")
             ax2.set_ylabel("signal / reference")
 
+    ax.set_xscale(xscale)
     ax.set_title(title or "point sweep")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -165,7 +168,9 @@ def render_track(pos_lists, cts_lists, origins, finals, path="track.png", title=
 
     return _save(fig, path)
 
-def render_fit(x, y, y_fit, path="fit.png", title="", xlabel="", annotation=""):
+def render_fit(
+    x, y, y_fit, path="fit.png", title="", xlabel="", annotation="", xscale="linear"
+):
     """Measured points with the fitted curve on top."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -176,6 +181,7 @@ def render_fit(x, y, y_fit, path="fit.png", title="", xlabel="", annotation=""):
     ax.plot(x, y, "o", ms=3.5, color="tab:blue", label="data")
     ax.plot(x, y_fit, "-", lw=1.6, color="tab:red", label="fit")
 
+    ax.set_xscale(xscale)
     ax.set_title(title or "fit")
     ax.set_xlabel(xlabel)
     ax.set_ylabel("signal")
