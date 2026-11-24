@@ -57,11 +57,17 @@ python -m src.api.cli point --mode time --count-mode Gate \
     --sequence T1/T1_no_mw.txt \
     --start 1 --end 5000 --points 100 --time-scale Exponential \
     --loops 10 --average 5000 \
-    --auto-track --track-threshold 3000 --track-mode galvo --track-step 0.0025
+    --auto-track --track-threshold 3000 --track-step 0.0025 --track-z-step 0.1
 
 # 自动找最亮点（会移动样品！laser_on 才开激光，结束后恢复）
-python -m src.api.cli track --mode galvo --step 0.0025 --integral-ms 200 --laser-on
-python -m src.api.cli track --mode stage --step 0.1 --integral-ms 200 --laser-on
+python -m src.api.cli track --step 0.0025 --z-step 0.1 --integral-ms 200 --laser-on
+
+# 定位：读当前位置 / 移动到某点（X/Y 是 galvo 电压，Z 是位移台 µm）
+python -m src.api.cli where
+python -m src.api.cli goto --x -0.479 --y 0.204
+python -m src.api.cli goto --dx 0.01 --dy 0.01
+python -m src.api.cli goto --scan "<扫描输出目录>" --row 95 --col 71
+python -m src.api.cli goto --z 49.1
 
 # 控制服务（UI 未开时可选；不开也能跑，CLI 会本地执行）
 python -m src.api.cli serve --port 8765
@@ -222,8 +228,11 @@ def _call_on_gui_thread(self, fn):
   `time + Gate`、`time + Histogram`），输出 `raw.txt` / `sweep.png` 或
   `histogram.png` / `summary.json`（含峰位、均值、对比度）
 - ✅ `--z` 缺省时读取位移台当前位置，不会擅自移动 Z
-- ✅ `execute`：**track** 已接真机（`MaxThread`，X/Y 用振镜或位移台、Z 用位移台），
+- ✅ `execute`：**track** 已接真机（`MaxThread`），**位移布局固定**：
+  X/Y 用 galvo（步长 `--step`，单位 V），Z 用压电位移台（步长 `--z-step`，单位 µm）；
   输出 `track.png`（三轴曲线，标注起点/终点）/ `summary.json`（origin、final、峰值）
+- ✅ **定位**：`goto`（绝对 / 相对 / 按扫描图像像素）和 `where`（只读当前位置），
+  坐标系同上；带 galvo ±10 V、Z 0–100 µm 的安全限制
 - ✅ `track` 支持 `--laser-on`：运行期间打开激光，结束后恢复（不给就要求激光已开）
 - ✅ **自动拟合**：`--fit lorentz|rabi|t1|t2|fid`，输出 `fit.png` + `summary.json` 的 `fit` 段
 - ✅ **本地任务历史**：`.api_jobs.json` 记录每个 job，无服务时 `status` / `result` 可用

@@ -37,6 +37,10 @@ def execute(job):
         return run_point_scan(job)
     if job.kind == "track":
         return run_track(job)
+    if job.kind == "goto":
+        return run_goto(job)
+    if job.kind == "where":
+        return run_where(job)
     raise NotImplementedError("no executor for %r yet" % job.kind)
 
 
@@ -56,15 +60,36 @@ def _write_raw(path, raw):
 def _summary_of(map2d, params, elapsed_s):
     data = np.asarray(map2d, dtype=float)
     peak_index = np.unravel_index(int(np.argmax(data)), data.shape)
-    return {
+    row, col = int(peak_index[0]), int(peak_index[1])
+
+    summary = {
         "shape": list(data.shape),
         "counts_mean": round(float(np.mean(data)), 2),
         "counts_max": round(float(np.max(data)), 1),
         "counts_min": round(float(np.min(data)), 1),
-        "peak_row_col": [int(peak_index[0]), int(peak_index[1])],
+        "peak_row_col": [row, col],
         "elapsed_s": round(elapsed_s, 2),
         "params": params,
     }
+
+    # the peak pixel as scan voltages, so the spot can be revisited with goto
+    try:
+        resolution = int(params.get("resolution", data.shape[1]))
+        x_start = float(params.get("x_start", -1.0))
+        x_end = float(params.get("x_end", 1.0))
+        y_start = float(params.get("y_start", -1.0))
+        y_end = float(params.get("y_end", 1.0))
+
+        summary["peak_x_v"] = round(
+            x_start + col * (x_end - x_start) / resolution, 5
+        )
+        summary["peak_y_v"] = round(
+            y_start + row * (y_end - y_start) / resolution, 5
+        )
+    except (TypeError, ValueError):
+        pass
+
+    return summary
 
 
 # ------------------------------------------------------------ confocal scan
@@ -278,25 +303,19 @@ def _write_table(path, columns, header):
     return path
 
 
-def _run_max_track(hardware, mode="galvo", step=None, integral_ms=200):
+def _run_max_track(hardware, step_v=None, z_step=None, integral_ms=200):
     """
-    One head-less MaxThread hill climb (X, Y, Z).
+    One head-less MaxThread hill climb.
 
-    Returns (ok, info) where info holds the origin, the final position and the
-    peak counts per axis.
+    The arrangement is fixed: X/Y move the galvo mirror (volts), Z moves the
+    piezo stage (micrometres).  Returns (ok, info).
     """
     from src.threads.track_threads.MaxThread import MaxThread
 
-    if step is None:
-        step = 0.0025 if mode == "galvo" else 0.1
-
     tracker = MaxThread(hardware=hardware)
-    tracker.step = float(step)
-    tracker.step_angle = float(step)
-    tracker.set_parameters(
-        integral_time=int(integral_ms),
-        scan_mode=0 if mode == "stage" else 1,
-    )
+    tracker.step_angle = float(0.0025 if step_v is None else step_v)
+    tracker.step = float(0.1 if z_step is None else z_step)
+    tracker.set_parameters(integral_time=int(integral_ms), scan_mode=1)
 
     collected = {}
     errors = []
@@ -306,7 +325,7 @@ def _run_max_track(hardware, mode="galvo", step=None, integral_ms=200):
     tracker.run()
 
     if errors:
-        print("[auto track] tracker error: %s" % "; ".join(errors))
+        print("[track] tracker error: %s" % "; ".join(errors))
 
     if errors or "data" not in collected:
         return False, {}
@@ -540,8 +559,8 @@ def run_point_scan(job):
 
                     ok, info = _run_max_track(
                         hardware,
-                        mode=params.get("track_mode", "galvo"),
-                        step=params.get("track_step"),
+                        step_v=params.get("track_step"),
+                        z_step=params.get("track_z_step"),
                         integral_ms=int(params.get("track_integral_ms", 200)),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -745,24 +764,19 @@ def run_point_scan(job):
 # ----------------------------------------------------------------- tracking
 def run_track(job):
     """
-    Find the brightest spot along X, Y and Z and move there.
+    Find the brightest spot and move there.
 
-    MaxThread measures 7 points per axis around the current position and moves
-    to the best one, so the sample really moves.  The laser is only touched
-    when laser_on is set; otherwise it must already be on for the APD to see
-    anything.
+    The arrangement is fixed: X/Y move the galvo mirror (volts), Z moves the
+    piezo stage (micrometres).  The sample really moves.
     """
     from src.hardware import DeviceManager
     from src.threads.track_threads.MaxThread import MaxThread
 
     params = job.params
-    mode = params.get("mode", "galvo")
-
-    if mode not in ("galvo", "stage"):
-        raise ValueError("mode must be 'galvo' or 'stage'")
 
     integral_ms = int(params.get("integral_ms", 200))
-    step = float(params.get("step", 0.0025 if mode == "galvo" else 0.1))
+    step_v = float(params.get("step", 0.0025))
+    z_step = float(params.get("z_step", 0.1))
     laser_on = bool(params.get("laser_on", False))
 
     hardware = DeviceManager()
@@ -786,18 +800,14 @@ def run_track(job):
         if hardware.pulser is None:
             raise RuntimeError("pulser not connected, cannot switch the laser on")
 
-        # digital 0 high and analog 0 = 1.0 is the laser-on state
         hardware.pulser.all_constant([0])
 
     thread = None
     try:
         thread = MaxThread(hardware=hardware)
-        thread.step = step
-        thread.step_angle = step
-        thread.set_parameters(
-            integral_time=integral_ms,
-            scan_mode=0 if mode == "stage" else 1,
-        )
+        thread.step_angle = step_v
+        thread.step = z_step
+        thread.set_parameters(integral_time=integral_ms, scan_mode=1)
 
         collected = {}
         errors = []
@@ -825,13 +835,14 @@ def run_track(job):
                 pos_origin,
                 pos_final,
                 path=os.path.join(job.out_dir, "track.png"),
-                title="max search (%s, step %g, %d ms)" % (mode, step, integral_ms),
+                title="max search (step %.4g V / %.4g um, %d ms)"
+                % (step_v, z_step, integral_ms),
             )
         ]
 
-        summary = {
-            "mode": mode,
-            "step": step,
+        return {
+            "step_v": step_v,
+            "z_step_um": z_step,
             "integral_ms": integral_ms,
             "origin": [round(float(v), 5) for v in pos_origin],
             "final": [round(float(v), 5) for v in pos_final],
@@ -839,7 +850,6 @@ def run_track(job):
             "elapsed_s": round(elapsed, 2),
             "laser_switched_on": laser_on,
         }
-        return summary
 
     finally:
         _RUNNING.pop(job.job_id, None)
@@ -863,5 +873,112 @@ def run_track(job):
         if laser_on:
             try:
                 hardware.reset_pulser()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# -------------------------------------------------------------- positioning
+def _read_position(hardware):
+    """Current position: X/Y are galvo volts, Z is piezo micrometres."""
+    return {
+        "x": float(hardware.scanner.read_angle_analog("1")),
+        "y": float(hardware.scanner.read_angle_analog("2")),
+        "z": float(hardware.mover.read_pos("3")),
+    }
+
+
+def _position_hardware():
+    from src.hardware import DeviceManager
+
+    hardware = DeviceManager()
+    hardware.init_mover()
+    hardware.init_scanner()
+
+    missing = []
+
+    if hardware.mover is None:
+        missing.append("mover")
+    if hardware.scanner is None:
+        missing.append("scanner")
+    if missing:
+        raise RuntimeError("devices not connected: %s" % ", ".join(missing))
+
+    return hardware
+
+
+def run_where(job):
+    """Read the current position; this never moves anything."""
+    hardware = _position_hardware()
+
+    try:
+        position = _read_position(hardware)
+
+        return {
+            "x_v": round(position["x"], 5),
+            "y_v": round(position["y"], 5),
+            "z_um": round(position["z"], 5),
+        }
+    finally:
+        for reset in (hardware.reset_scanner, hardware.reset_mover):
+            try:
+                reset()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def run_goto(job):
+    """Move to a point: X/Y galvo volts, Z piezo micrometres."""
+    from src.api.plan import resolve_goto_target
+
+    params = job.params
+    hardware = _position_hardware()
+
+    try:
+        before = _read_position(hardware)
+
+        target = {}
+        requested = set()
+
+        relative = any(params.get(key) is not None for key in ("dx", "dy", "dz"))
+
+        if relative:
+            for key in ("x", "y", "z"):
+                delta = params.get("d" + key)
+
+                if delta is not None:
+                    target[key] = before[key] + float(delta)
+                    requested.add(key)
+        else:
+            target = resolve_goto_target(params)
+            requested = set(target)
+
+        # X/Y on the galvo mirror
+        if "x" in requested:
+            hardware.scanner.mov_angle_analog("1", float(target["x"]))
+        if "y" in requested:
+            hardware.scanner.mov_angle_analog("2", float(target["y"]))
+
+        # Z on the piezo stage
+        if "z" in requested:
+            hardware.mover.move_pos("3", float(target["z"]))
+
+        time.sleep(0.2)
+        after = _read_position(hardware)
+
+        summary = {}
+
+        for key, suffix in (("x", "v"), ("y", "v"), ("z", "um")):
+            summary["from_%s_%s" % (key, suffix)] = round(before[key], 5)
+            summary["to_%s_%s" % (key, suffix)] = round(after[key], 5)
+
+            if key in target:
+                summary["target_%s_%s" % (key, suffix)] = round(float(target[key]), 5)
+
+        return summary
+
+    finally:
+        for reset in (hardware.reset_scanner, hardware.reset_mover):
+            try:
+                reset()
             except Exception:  # noqa: BLE001
                 pass

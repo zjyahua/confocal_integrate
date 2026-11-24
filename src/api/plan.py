@@ -9,6 +9,7 @@ agent cannot start a scan that the Pulse Streamer cannot hold.
 from __future__ import annotations
 
 import ast
+import json
 import math
 import os
 
@@ -28,6 +29,8 @@ LIMITS = {
     "max_average": 500000,
     "max_seconds": 3600.0,
     "max_integral_ms": 5000,
+    "max_galvo_v": 10.0,
+    "max_stage_um": 100.0,
 }
 
 
@@ -297,11 +300,9 @@ def plan_point(params):
     # reference counts fall below the threshold
     auto_track = bool(params.get("auto_track", False))
     track_threshold = params.get("track_threshold")
-    track_mode = params.get("track_mode", "galvo")
     track_integral_ms = int(params.get("track_integral_ms", 200))
-    track_step = float(
-        params.get("track_step", 0.0025 if track_mode == "galvo" else 0.1)
-    )
+    track_step = float(params.get("track_step", 0.0025))
+    track_z_step = float(params.get("track_z_step", 0.1))
 
     # optional curve fit of the finished sweep
     fit_kind = str(params.get("fit", "none") or "none").lower()
@@ -321,11 +322,11 @@ def plan_point(params):
         elif int(track_threshold) <= 0:
             errors.append("track_threshold must be positive")
 
-        if track_mode not in ("galvo", "stage"):
-            errors.append("track_mode must be 'galvo' or 'stage'")
-
         if track_step <= 0:
-            errors.append("track_step must be positive")
+            errors.append("track_step (galvo volts) must be positive")
+
+        if track_z_step <= 0:
+            errors.append("track_z_step (micrometres) must be positive")
 
         if not 1 <= track_integral_ms <= LIMITS["max_integral_ms"]:
             errors.append(
@@ -434,8 +435,8 @@ def plan_point(params):
     if auto_track:
         plan["auto_track"] = True
         plan["track_threshold"] = int(track_threshold)
-        plan["track_mode"] = track_mode
-        plan["track_step"] = track_step
+        plan["track_step_v"] = track_step
+        plan["track_z_step_um"] = track_z_step
         plan["track_integral_ms"] = track_integral_ms
         # one tracking run per trigger, roughly
         plan["estimate_s"] = round(plan["estimate_s"] + 12.0, 1)
@@ -452,41 +453,44 @@ def plan_point(params):
 
 
 def plan_track(params):
-    """Plan a max-count tracking run (hill climb on X, Y and Z)."""
-    mode = params.get("mode", "galvo")
+    """
+    Plan a max-count tracking run.
 
-    if mode not in ("galvo", "stage"):
-        return _finish({"errors": ["mode must be 'galvo' or 'stage', got %r" % mode]})
-
-    default_step = 0.0025 if mode == "galvo" else 0.1
-    step = float(params.get("step", default_step))
+    The arrangement is fixed on this machine: X/Y move the galvo mirror and are
+    measured in volts, Z moves the piezo stage and is measured in micrometres.
+    """
+    step_v = float(params.get("step", 0.0025))
+    z_step_um = float(params.get("z_step", 0.1))
     integral_ms = int(params.get("integral_ms", 200))
 
     errors = []
 
-    if step <= 0:
-        errors.append("step must be positive")
+    if step_v <= 0:
+        errors.append("step (galvo volts) must be positive")
+
+    if z_step_um <= 0:
+        errors.append("z_step (micrometres) must be positive")
 
     if not 1 <= integral_ms <= LIMITS["max_integral_ms"]:
+        errors.append("integral_ms outside [1, %d]" % LIMITS["max_integral_ms"])
+
+    if step_v * 3 > LIMITS["max_galvo_v"]:
         errors.append(
-            "integral_ms outside [1, %d]" % LIMITS["max_integral_ms"]
+            "step %g V scans +-%g V, above the %g V galvo limit"
+            % (step_v, 3 * step_v, LIMITS["max_galvo_v"])
         )
 
     if errors:
         return _finish({"errors": errors})
 
-    # MaxThread scans 7 points per axis plus one dummy point to drop a bad
-    # first count, for X, Y and Z.
+    # MaxThread scans 7 points per axis plus one dummy point, for X, Y and Z.
     points_per_axis = 8
     axes = 3
     estimate_s = axes * points_per_axis * integral_ms / 1000.0 + 6.0
 
-    source = "galvo mirror" if mode == "galvo" else "piezo stage"
-    unit = "V" if mode == "galvo" else "um"
-
     warnings = [
-        "%s will be moved: X/Y by the %s, Z by the piezo stage"
-        % ("the sample", source)
+        "the sample will move: X/Y on the galvo mirror (+-%.4g V), "
+        "Z on the piezo stage (+-%.4g um)" % (3 * step_v, 3 * z_step_um)
     ]
 
     if not params.get("laser_on"):
@@ -497,18 +501,145 @@ def plan_track(params):
 
     plan = {
         "kind": "track",
-        "mode": mode,
-        "step": step,
-        "step_unit": unit,
-        "scan_range": [round(-3 * step, 6), round(3 * step, 6)],
+        "step_v": step_v,
+        "z_step_um": z_step_um,
+        "scan_range_v": [round(-3 * step_v, 6), round(3 * step_v, 6)],
+        "scan_range_um": [round(-3 * z_step_um, 6), round(3 * z_step_um, 6)],
         "integral_ms": integral_ms,
-        "axes": ["x", "y", "z"],
+        "axes": ["x (galvo V)", "y (galvo V)", "z (stage um)"],
         "points_per_axis": 7,
         "estimate_s": round(estimate_s, 1),
         "warnings": warnings,
     }
 
     return _finish(plan)
+
+
+def resolve_goto_target(params):
+    """
+    Work out the absolute (x, y, z) a goto addresses.
+
+    Three ways to address a point:
+      absolute  x / y / z
+      relative  dx / dy / dz (added to the current position by the executor)
+      pixel     scan_dir + row + col, converted with that scan's parameters
+    """
+    target = {}
+
+    for key in ("x", "y", "z"):
+        if params.get(key) is not None:
+            target[key] = float(params[key])
+
+    for key in ("dx", "dy", "dz"):
+        if params.get(key) is not None:
+            target[key[1:]] = float(params[key])
+
+    scan_dir = params.get("scan_dir")
+    if scan_dir:
+        row = params.get("row")
+        col = params.get("col")
+
+        if row is None or col is None:
+            raise ValueError("scan_dir needs both row and col")
+
+        with open(os.path.join(scan_dir, "params.json"), encoding="utf-8") as handle:
+            scan_params = json.load(handle)
+
+        missing_keys = [
+            key for key in ("x_start", "x_end", "y_start", "y_end")
+            if key not in scan_params
+        ]
+
+        if missing_keys:
+            raise ValueError(
+                "scan_dir must be a confocal scan output (its params.json needs "
+                "%s)" % ", ".join(missing_keys)
+            )
+
+        resolution = int(scan_params.get("resolution", 100))
+        x_start = float(scan_params["x_start"])
+        x_end = float(scan_params["x_end"])
+        y_start = float(scan_params["y_start"])
+        y_end = float(scan_params["y_end"])
+
+        target.setdefault("x", x_start + float(col) * (x_end - x_start) / resolution)
+        target.setdefault("y", y_start + float(row) * (y_end - y_start) / resolution)
+
+    if not target:
+        raise ValueError(
+            "nothing to move: give x/y/z, dx/dy/dz, or scan_dir with row and col"
+        )
+
+    return target
+
+
+def plan_goto(params):
+    """
+    Validate a move to a point.
+
+    The arrangement is fixed: X/Y are galvo mirror volts, Z is piezo stage
+    micrometres.
+    """
+    targeting = (
+        any(params.get(key) is not None for key in ("x", "y", "z")),
+        any(params.get(key) is not None for key in ("dx", "dy", "dz")),
+        bool(params.get("scan_dir")),
+    )
+
+    if sum(1 for item in targeting if item) > 1:
+        return _finish(
+            {"errors": ["use only one of absolute x/y/z, relative dx/dy/dz or scan_dir"]}
+        )
+
+    try:
+        target = resolve_goto_target(params)
+    except (OSError, ValueError, KeyError) as exc:
+        return _finish({"errors": ["cannot resolve the target: %s" % exc]})
+
+    for key in ("x", "y"):
+        if key in target and abs(target[key]) > LIMITS["max_galvo_v"]:
+            return _finish(
+                {
+                    "errors": [
+                        "%s=%g V is outside +-%g V (galvo range)"
+                        % (key, target[key], LIMITS["max_galvo_v"])
+                    ]
+                }
+            )
+
+    if "z" in target and not 0 <= target["z"] <= LIMITS["max_stage_um"]:
+        return _finish(
+            {
+                "errors": [
+                    "z=%g um is outside 0..%g um (the piezo range); check the value"
+                    % (target["z"], LIMITS["max_stage_um"])
+                ]
+            }
+        )
+
+    return _finish(
+        {
+            "kind": "goto",
+            "target": {key: round(value, 5) for key, value in target.items()},
+            "units": {"x": "V (galvo)", "y": "V (galvo)", "z": "um (stage)"},
+            "estimate_s": 2.0,
+            "warnings": [
+                "the sample will move: X/Y on the galvo mirror, Z on the piezo stage"
+            ],
+        }
+    )
+
+
+def plan_where(params):
+    """Read the current position; it never moves anything."""
+    return _finish(
+        {
+            "kind": "where",
+            "units": {"x": "V (galvo)", "y": "V (galvo)", "z": "um (stage)"},
+            "estimate_s": 1.0,
+            "warnings": [],
+        }
+    )
 
 
 def build_plan(kind, params):
@@ -518,4 +649,8 @@ def build_plan(kind, params):
         return plan_point(params)
     if kind == "track":
         return plan_track(params)
+    if kind == "goto":
+        return plan_goto(params)
+    if kind == "where":
+        return plan_where(params)
     return _finish({"errors": ["unknown job kind: %r" % kind]})

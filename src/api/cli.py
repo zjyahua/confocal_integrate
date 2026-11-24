@@ -179,11 +179,13 @@ def cmd_point(args):
     if args.auto_track:
         params["auto_track"] = True
         params["track_threshold"] = args.track_threshold
-        params["track_mode"] = args.track_mode
         params["track_integral_ms"] = args.track_integral_ms
 
         if args.track_step is not None:
             params["track_step"] = args.track_step
+
+        if args.track_z_step is not None:
+            params["track_z_step"] = args.track_z_step
 
         if args.track_continue_on_failure:
             params["track_stop_on_failure"] = False
@@ -203,7 +205,6 @@ def cmd_point(args):
 
 def cmd_track(args):
     params = {
-        "mode": args.mode,
         "integral_ms": args.integral_ms,
         "laser_on": args.laser_on,
     }
@@ -211,7 +212,31 @@ def cmd_track(args):
     if args.step is not None:
         params["step"] = args.step
 
+    if args.z_step is not None:
+        params["z_step"] = args.z_step
+
     return _run("track", params, args)
+
+
+def cmd_goto(args):
+    params = {}
+
+    for key in ("x", "y", "z", "dx", "dy", "dz"):
+        value = getattr(args, key)
+
+        if value is not None:
+            params[key] = value
+
+    if args.scan:
+        params["scan_dir"] = args.scan
+        params["row"] = args.row
+        params["col"] = args.col
+
+    return _run("goto", params, args)
+
+
+def cmd_where(args):
+    return _run("where", {}, args)
 
 
 def cmd_status(args):
@@ -371,10 +396,10 @@ def build_parser():
                        help="run a tracking search when ref drops below the threshold")
     point.add_argument("--track-threshold", type=int, default=None,
                        help="ref counts that trigger tracking (required with --auto-track)")
-    point.add_argument("--track-mode", choices=("galvo", "stage"), default="galvo",
-                       help="how the tracking search moves X/Y")
     point.add_argument("--track-step", type=float, default=None,
-                       help="tracking step: V for galvo (0.0025), um for stage (0.1)")
+                       help="galvo step for the tracking search in V (default 0.0025)")
+    point.add_argument("--track-z-step", type=float, default=None,
+                       help="piezo step for the tracking search in um (default 0.1)")
     point.add_argument("--track-integral-ms", type=int, default=200,
                        help="count integration time of one tracking point")
     point.add_argument("--track-continue-on-failure", action="store_true",
@@ -393,16 +418,34 @@ def build_parser():
     track = sub.add_parser(
         "track", help="find the brightest spot and move the sample there"
     )
-    track.add_argument("--mode", choices=("galvo", "stage"), default="galvo",
-                       help="galvo: move X/Y with the mirror; stage: with the piezo")
     track.add_argument("--step", type=float, default=None,
-                       help="step in V (galvo, default 0.0025) or um (stage, default 0.1)")
+                       help="galvo step for X/Y in V (default 0.0025)")
+    track.add_argument("--z-step", type=float, default=None,
+                       help="piezo step for Z in um (default 0.1)")
     track.add_argument("--integral-ms", type=int, default=200,
                        help="count integration time per point in ms")
     track.add_argument("--laser-on", action="store_true",
                        help="switch the laser on for the run (restored afterwards)")
     common(track)
     track.set_defaults(func=cmd_track)
+
+    goto = sub.add_parser("goto", help="move the sample to a point")
+    goto.add_argument("--x", type=float, default=None, help="absolute X (galvo V)")
+    goto.add_argument("--y", type=float, default=None, help="absolute Y")
+    goto.add_argument("--z", type=float, default=None, help="absolute Z (piezo, um)")
+    goto.add_argument("--dx", type=float, default=None, help="relative X")
+    goto.add_argument("--dy", type=float, default=None, help="relative Y")
+    goto.add_argument("--dz", type=float, default=None, help="relative Z")
+    goto.add_argument("--scan", default=None,
+                      help="scan output dir, to address a pixel of its image")
+    goto.add_argument("--row", type=int, default=None)
+    goto.add_argument("--col", type=int, default=None)
+    common(goto)
+    goto.set_defaults(func=cmd_goto)
+
+    where = sub.add_parser("where", help="print the current position")
+    common(where)
+    where.set_defaults(func=cmd_where)
 
     status = sub.add_parser("status", help="list jobs or show one job")
     status.add_argument("--job")
