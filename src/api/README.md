@@ -77,6 +77,37 @@ python -m src.api.cli demo --out experiments/demo
 
 `--json` 输出机器可读结果，便于 agent 解析。
 
+## 自动拟合
+
+点测量结束后可以直接拟合（模型移植自 `data_processing/Fitting_methods`）：
+
+| `--fit` | 适用 | 输出参数 |
+| --- | --- | --- |
+| `lorentz` | ODMR 吸收峰（自动找峰，最多 8 个） | 每个峰的 center / fwhm / amplitude、background |
+| `rabi` | Rabi 振荡 | amplitude、frequency_mhz、period_ns、phase、t2_ns、offset |
+| `t1` | T1 弛豫 | amplitude、t1_ns、offset |
+| `t2` | T2 弛豫（stretched） | amplitude、t2_ns、beta、offset |
+| `fid` | Ramsey / FID | amplitude、frequency_mhz、period_ns、t2_star_ns、n、offset |
+
+```bash
+# ODMR：拟合 sig/ref 比值，默认自动找峰
+python -m src.api.cli point --mode freq --count-mode Gate \
+    --sequence pulse_odmr/Pulse_ODMR_130ns.txt \
+    --start 2800 --end 2940 --step 1 --loops 10 --average 5000 \
+    --fit lorentz
+
+# 指定峰数 / 换拟合列
+--fit lorentz --fit-peaks 2 --fit-column ratio|sig|ref
+
+# T1
+python -m src.api.cli point --mode time --count-mode Gate \
+    --sequence T1/T1_no_mw.txt --start 1 --end 100000 --points 60 \
+    --time-scale Exponential --loops 10 --average 5000 --fit t1
+```
+
+拟合失败不会让扫描失败：结果里会写 `"fit": {ok: false, error: ...}`。
+成功时写 `fit.png`（数据 + 拟合曲线 + 参数框）和 `summary.json` 的 `fit` 段。
+
 ## 本地任务历史
 
 没有控制服务时，`status` / `result` 读仓库根目录的 `.api_jobs.json`（已 gitignore，
@@ -194,6 +225,7 @@ def _call_on_gui_thread(self, fn):
 - ✅ `execute`：**track** 已接真机（`MaxThread`，X/Y 用振镜或位移台、Z 用位移台），
   输出 `track.png`（三轴曲线，标注起点/终点）/ `summary.json`（origin、final、峰值）
 - ✅ `track` 支持 `--laser-on`：运行期间打开激光，结束后恢复（不给就要求激光已开）
+- ✅ **自动拟合**：`--fit lorentz|rabi|t1|t2|fid`，输出 `fit.png` + `summary.json` 的 `fit` 段
 - ✅ **本地任务历史**：`.api_jobs.json` 记录每个 job，无服务时 `status` / `result` 可用
 - ✅ **实时进度**：点测量与共聚焦扫描运行期间每隔 `--live-interval` 秒刷新
   `live.png` / `live.json`，并打印 `[live]` 进度行（含 ETA）

@@ -164,3 +164,35 @@ def render_track(pos_lists, cts_lists, origins, finals, path="track.png", title=
         fig.suptitle(title, fontsize=11)
 
     return _save(fig, path)
+
+def render_fit(x, y, y_fit, path="fit.png", title="", xlabel="", annotation=""):
+    """Measured points with the fitted curve on top."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    y_fit = np.asarray(y_fit, dtype=float)
+
+    fig, ax = plt.subplots(figsize=STYLE["figsize"])
+
+    ax.plot(x, y, "o", ms=3.5, color="tab:blue", label="data")
+    ax.plot(x, y_fit, "-", lw=1.6, color="tab:red", label="fit")
+
+    ax.set_title(title or "fit")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("signal")
+    ax.grid(True, alpha=STYLE["grid_alpha"])
+    ax.legend(fontsize=8)
+
+    if annotation:
+        ax.text(
+            0.02,
+            0.98,
+            annotation,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=8,
+            family="monospace",
+            bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.85),
+        )
+
+    return _save(fig, path)

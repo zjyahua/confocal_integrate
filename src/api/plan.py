@@ -303,6 +303,15 @@ def plan_point(params):
         params.get("track_step", 0.0025 if track_mode == "galvo" else 0.1)
     )
 
+    # optional curve fit of the finished sweep
+    fit_kind = str(params.get("fit", "none") or "none").lower()
+
+    if fit_kind not in ("none", "lorentz", "rabi", "t1", "t2", "fid"):
+        errors.append(
+            "fit must be one of none, lorentz, rabi, t1, t2, fid, got %r"
+            % fit_kind
+        )
+
     if auto_track:
         if track_threshold is None:
             errors.append(
@@ -414,6 +423,13 @@ def plan_point(params):
         plan["bin_width_ps"] = bin_width
         plan["bin_num"] = bin_num
         plan["histogram_length_ns"] = bin_width * bin_num / 1000.0
+
+    if fit_kind not in ("none", ""):
+        plan["fit"] = fit_kind
+        plan["fit_column"] = params.get("fit_column", "ratio")
+
+        if params.get("fit_peaks"):
+            plan["fit_peaks"] = int(params["fit_peaks"])
 
     if auto_track:
         plan["auto_track"] = True

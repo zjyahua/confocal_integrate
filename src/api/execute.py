@@ -653,6 +653,54 @@ def run_point_scan(job):
                     (ref_max - ref_min) / ref_max * 100.0, 2
                 )
 
+            # optional curve fit on the same data
+            fit_kind = str(params.get("fit", "none") or "none").lower()
+
+            if fit_kind not in ("none", ""):
+                from src.api import fitting
+
+                column = str(params.get("fit_column", "ratio")).lower()
+
+                if column == "sig":
+                    y_fit_data = np.asarray(sig_ave, dtype=float)
+                elif column == "ref":
+                    y_fit_data = np.asarray(ref_ave, dtype=float)
+                else:
+                    column = "ratio"
+                    y_fit_data = np.asarray(sig_ave, dtype=float) / np.maximum(
+                        np.asarray(ref_ave, dtype=float), 1e-9
+                    )
+
+                options = {}
+
+                if fit_kind == "lorentz" and params.get("fit_peaks"):
+                    options["peaks"] = int(params["fit_peaks"])
+
+                try:
+                    fit_result, y_curve = fitting.fit_curve(
+                        fit_kind, x, y_fit_data, **options
+                    )
+                    fit_result["column"] = column
+                    summary["fit"] = fit_result
+
+                    files.append(
+                        render.render_fit(
+                            x,
+                            y_fit_data,
+                            y_curve,
+                            path=os.path.join(job.out_dir, "fit.png"),
+                            title="%s fit (%s)" % (fit_kind, column),
+                            xlabel=x_label,
+                            annotation=fitting.describe(fit_result),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - a failed fit is not fatal
+                    summary["fit"] = {
+                        "kind": fit_kind,
+                        "ok": False,
+                        "error": "%s: %s" % (type(exc).__name__, exc),
+                    }
+
             files.append(
                 render.render_sweep(
                     x,

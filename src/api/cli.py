@@ -191,6 +191,13 @@ def cmd_point(args):
     if args.sequence:
         params["sequence"] = args.sequence
 
+    if args.fit and args.fit != "none":
+        params["fit"] = args.fit
+        params["fit_column"] = args.fit_column
+
+        if args.fit_peaks:
+            params["fit_peaks"] = args.fit_peaks
+
     return _run("point_scan", params, args)
 
 
@@ -372,6 +379,13 @@ def build_parser():
                        help="count integration time of one tracking point")
     point.add_argument("--track-continue-on-failure", action="store_true",
                        help="keep scanning when a tracking run fails")
+    point.add_argument("--fit", choices=("none", "lorentz", "rabi", "t1", "t2", "fid"),
+                       default="none",
+                       help="fit the finished sweep and write fit.png")
+    point.add_argument("--fit-column", choices=("ratio", "sig", "ref"),
+                       default="ratio", help="which curve to fit")
+    point.add_argument("--fit-peaks", type=int, default=None,
+                       help="Lorentzian: keep only the N strongest peaks")
     point.add_argument("--sequence", default="rabi/Rabi_130ns.txt")
     common(point)
     point.set_defaults(func=cmd_point)
