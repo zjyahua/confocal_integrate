@@ -12,6 +12,8 @@ class TimeTaggerCounter():
         # initiate timetagger
         self.tagger = TimeTagger.createTimeTagger("22440012YD")
         self.tagger.reset()
+        # optional fast counter of the gate channel, diagnostics only
+        self.gate_edges = None
         # channel_list
         self._channel_apd = 1
         self._channel_detect_rise = 2  # Rising edge on input 2
@@ -298,15 +300,27 @@ class TimeTaggerCounter():
     def wait_flim_finished(self):
         self.flim.waitUntilFinished(timeout=-1)
 
-    def wait_gate_finished(self, timeout_s=None, poll_s=0.005, sample_s=0.02, stall_s=0.15):
+    def wait_gate_finished(
+            self,
+            timeout_s=None,
+            poll_s=0.005,
+            sample_s=0.02,
+            stall_s=0.15,
+            grace_s=0.6,
+    ):
         """
         Wait until the gate counter has collected its values.
 
         ready() only turns True when every slot of the buffer is filled. The
         tagger can miss a gate at the very start or end of a run, in which case
         ready() never turns True even though the data is complete, so the wait
-        also ends once the data has stopped changing for stall_s. A couple of
-        missing gates are tolerated by the callers.
+        also ends once the data has stopped changing for stall_s.
+
+        A stall is only accepted as "finished" when the buffer is essentially
+        full (99.5 %). If it is far from full the tagger is usually still
+        draining its queue: reading there truncates the block, and the caller
+        clears the buffer afterwards, so the rest would be lost for good. Such
+        a run gets grace_s more time to catch up before the wait gives up.
 
         timeout_s : total budget in seconds (None -> 10 s). Callers that know
             the acquisition time (pulse period x repetitions) should pass it,
@@ -314,11 +328,17 @@ class TimeTaggerCounter():
         poll_s : how often ready() is checked (cheap).
         sample_s : how often getData() is compared for stall detection
             (expensive for large buffers, so kept slower than poll_s).
+        stall_s : idle time that counts as "no more data" when the buffer is
+            full.
+        grace_s : additional idle time granted while the buffer is still
+            incomplete.
 
-        Returns True when the buffer is full or the data stopped growing, False
-        only when the budget ran out while data was still arriving.
+        Returns True when the buffer is full or the data stopped growing with
+        the buffer full, False when it is still incomplete after the grace time
+        or the budget ran out.
         """
         budget = 10.0 if timeout_s is None else max(0.5, float(timeout_s))
+        expected = max(1, int(self._number_of_gates))
         start = time.monotonic()
         next_sample = start + sample_s
 
@@ -336,14 +356,27 @@ class TimeTaggerCounter():
 
             if now >= next_sample:
                 data = self.gate.getData()
+                idle_for = now - last_change
+                changed = last_sample is None or not np.array_equal(data, last_sample)
 
-                if last_sample is None or not np.array_equal(data, last_sample):
+                if changed:
+                    if last_sample is not None and idle_for >= stall_s:
+                        filled = int(np.count_nonzero(self.gate.getIndex()))
+                        print(
+                            f"[gate wait] data resumed after {idle_for:.2f}s idle "
+                            f"(filled={filled}/{expected})"
+                        )
                     last_sample = data
                     last_change = now
-                elif now - last_change >= stall_s:
-                    # Everything that is going to arrive has arrived; a missing
-                    # gate or two at the end is acceptable.
-                    return True
+                elif idle_for >= stall_s:
+                    filled = int(np.count_nonzero(self.gate.getIndex()))
+
+                    if filled >= 0.995 * expected:
+                        # Complete enough; a gate or two at the edge is fine.
+                        return True
+
+                    if idle_for >= stall_s + grace_s:
+                        return False
 
                 next_sample = now + sample_s
 
@@ -367,6 +400,52 @@ class TimeTaggerCounter():
 
         return filled, int(self._number_of_gates), bool(self.gate.isRunning())
 
+    def get_tagger_overflows(self):
+        """
+        Total overflow counter of the tagger (-1 when it is unavailable).
+
+        A value that grows between two calls means the tagger could not hand
+        the tags over fast enough and gates were dropped.
+        """
+        try:
+            return int(self.tagger.getOverflows())
+        except Exception:
+            return -1
+
+    def get_gate_diagnostics(self):
+        """
+        Detailed gate buffer snapshot for the scan diagnostics.
+
+        getIndex() leaves unfilled bins at zero, so the filled cells can be
+        located exactly:
+
+        last_filled : highest filled index (-1 when nothing arrived)
+        gaps        : empty cells before last_filled
+
+        A contiguous block (gaps == 0) means the pulses stopped early, while
+        scattered holes mean the tagger dropped gates.
+        """
+        try:
+            index = np.asarray(self.gate.getIndex())
+            mask = index != 0
+        except Exception:
+            data = np.asarray(self.gate.getData())
+            mask = data != 0
+
+        filled = int(np.count_nonzero(mask))
+        positions = np.flatnonzero(mask)
+        last_filled = int(positions[-1]) if positions.size else -1
+        gaps = int(last_filled + 1 - filled) if last_filled >= 0 else 0
+
+        return {
+            "filled": filled,
+            "expected": int(self._number_of_gates),
+            "running": bool(self.gate.isRunning()),
+            "last_filled": last_filled,
+            "gaps": gaps,
+            "overflows": self.get_tagger_overflows(),
+        }
+
     def get_flim_scan_current_data(self):
         # arr = self.flim_scan.getData()
         # arr = self.flim_scan.getCurrentFrame()
@@ -387,6 +466,41 @@ class TimeTaggerCounter():
 
     def gate_recount(self):
         self.gate.clear()
+
+    def start_gate_edge_monitor(self):
+        """
+        Start an independent fast counter of the gate-channel rising edges.
+
+        Diagnostics only. Comparing its total with get_gate_progress() tells
+        whether the pulses were emitted (edges == gates) or whether the gate
+        measurement lost them (edges > gates).
+
+        The counter uses 1 ms bins and keeps 1 s of history, so the sum read
+        back after one acquisition is the number of edges of that acquisition.
+        """
+        if self.gate_edges is None:
+            self.gate_edges = TimeTagger.Counter(
+                tagger=self.tagger,
+                channels=[self._channel_detect_rise],
+                binwidth=int(1e9),  # 1 ms per bin, in ps
+                n_values=1000,      # 1 s of history
+            )
+            self.tagger.sync()
+
+        self.gate_edges.clear()
+        self.gate_edges.start()
+        return 0
+
+    def read_gate_edges(self):
+        """Rising edges on the gate channel since start_gate_edge_monitor()."""
+        if self.gate_edges is None:
+            return -1
+
+        return int(np.sum(np.asarray(self.gate_edges.getData(), dtype=np.int64)))
+
+    def stop_gate_edge_monitor(self):
+        if self.gate_edges is not None:
+            self.gate_edges.stop()
 
     def flim_recount(self):
         self.flim.clear()

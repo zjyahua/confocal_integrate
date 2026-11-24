@@ -243,6 +243,7 @@ class SinglePointscanThread(QtCore.QThread):
         # counter cannot be full before roughly average_num x pulse period.
         # Give the wait three times that long (and at least 1 s).
         gate_wait_s = 10.0
+        point_duration_s = 0.0
 
         if self.pulse_seq and "Sum" in self.pulse_seq:
             try:
@@ -290,8 +291,14 @@ class SinglePointscanThread(QtCore.QThread):
 
                     time.sleep(0.1)
 
+                    overflows_before = self._hardware.counter.get_tagger_overflows()
+
+                    pulser_start = time.monotonic()
                     self._hardware.pulser.start_now()
                     self._wait_pulser_finished()
+                    pulser_wait_s = time.monotonic() - pulser_start
+
+                    filled, expected = int(gates_per_point), int(gates_per_point)
 
                     # Wait until the gate values have been acquired. Reading the
                     # counter too early silently returns zeros for the tail.
@@ -310,11 +317,20 @@ class SinglePointscanThread(QtCore.QThread):
                         # A few missing gates at the end are tolerated; only
                         # report when the wait failed or a lot is missing.
                         if (not finished) or fill_ratio < 0.99:
+                            detail = self._hardware.counter.get_gate_diagnostics()
+                            overflow_now = detail["overflows"]
+                            if overflow_now >= 0 and overflows_before >= 0:
+                                overflow_delta = overflow_now - overflows_before
+                            else:
+                                overflow_delta = -1
                             print(
                                 f"[gate diag] freq={freq:.3f} point={point_idx} "
                                 f"finished={finished} "
                                 f"filled={filled}/{expected} "
+                                f"last={detail['last_filled']} gaps={detail['gaps']} "
+                                f"overflow=+{overflow_delta} "
                                 f"running={running} "
+                                f"pulser={pulser_wait_s:.3f}s block~{point_duration_s:.3f}s "
                                 f"waited={wait_elapsed:.2f}s"
                             )
                     else:
@@ -351,7 +367,15 @@ class SinglePointscanThread(QtCore.QThread):
 
                     self.data_update.emit(packet)
 
-                    keep_scanning = self._auto_track_if_needed_after_scan_point(ref)
+                    # Missing gates scale sig and ref down together, so compare a
+                    # fill-ratio corrected ref with the tracking threshold.
+                    ref_for_track = ref
+                    if expected and filled:
+                        ref_for_track = int(round(ref * expected / filled))
+
+                    keep_scanning = self._auto_track_if_needed_after_scan_point(
+                        ref_for_track
+                    )
 
                     if not keep_scanning:
                         break
@@ -538,6 +562,11 @@ class SinglePointscanThread(QtCore.QThread):
                 number_of_gates=int(gates_per_point)
             )
 
+            # create the diagnostic edge counter before the scan starts, so its
+            # tagger.sync() cannot disturb the gate buffer of the first point
+            if hasattr(self._hardware.counter, "start_gate_edge_monitor"):
+                self._hardware.counter.start_gate_edge_monitor()
+
             self._hardware.counter.start_gate_measure()
             self._hardware.pulser.trigger_mode()
 
@@ -566,9 +595,11 @@ class SinglePointscanThread(QtCore.QThread):
                     # A malformed sequence is reported by generate_pulse_sequence
                     # below, so fall back to a safe default here.
                     gate_wait_s = 10.0
+                    point_duration_s = 0.0
                     try:
                         pulse_period_ns = int(float(self.pulse_seq_update_with_time["Sum"][0]))
-                        gate_wait_s = max(1.0, 3.0 * pulse_period_ns * int(self.average_num) / 1e9)
+                        point_duration_s = pulse_period_ns * int(self.average_num) / 1e9
+                        gate_wait_s = max(1.0, 3.0 * point_duration_s)
                     except (KeyError, IndexError, TypeError, ValueError):
                         pass
 
@@ -576,14 +607,45 @@ class SinglePointscanThread(QtCore.QThread):
                         self.pulse_seq_update_with_time,
                         self.count_mode
                     )
-                    self._hardware.pulser.upload_seq_list(self.pulse_seq_time, self.average_num)
 
-                    self._hardware.pulser.start_now()
-                    self._wait_pulser_finished()
+                    # A short pulse block sometimes comes back half empty (the
+                    # pulse streamer cuts the stream short), so redo the point
+                    # and keep the attempt that collected the most gates.
+                    gate_retry_num = 2
+                    attempt_fills = []
 
-                    # Wait until the gate values have been acquired. Reading the
-                    # counter too early silently returns zeros for the tail.
-                    if hasattr(self._hardware.counter, "wait_gate_finished"):
+                    filled, expected = int(gates_per_point), int(gates_per_point)
+                    fill_ratio = 1.0
+                    running = False
+                    best_fill = -1
+                    best_cts = None
+                    gate_edges = -1
+
+                    for attempt in range(gate_retry_num):
+                        if attempt > 0:
+                            # throw the incomplete buffer away and try again
+                            if hasattr(self._hardware.counter, "gate_recount"):
+                                self._hardware.counter.gate_recount()
+
+                        self._hardware.pulser.upload_seq_list(
+                            self.pulse_seq_time, self.average_num
+                        )
+
+                        overflows_before = self._hardware.counter.get_tagger_overflows()
+                        self._hardware.counter.start_gate_edge_monitor()
+
+                        pulser_start = time.monotonic()
+                        self._hardware.pulser.start_now()
+                        self._wait_pulser_finished()
+                        pulser_wait_s = time.monotonic() - pulser_start
+
+                        if not hasattr(self._hardware.counter, "wait_gate_finished"):
+                            time.sleep(0.05)
+                            attempt_fills.append(int(gates_per_point))
+                            break
+
+                        # Wait until the gate values have been acquired. Reading
+                        # the counter too early silently returns zeros for the tail.
                         wait_start = time.monotonic()
                         finished = self._hardware.counter.wait_gate_finished(
                             timeout_s=gate_wait_s
@@ -594,23 +656,48 @@ class SinglePointscanThread(QtCore.QThread):
                             self._hardware.counter.get_gate_progress()
                         )
                         fill_ratio = filled / expected if expected else 1.0
+                        attempt_fills.append(filled)
+                        gate_edges = self._hardware.counter.read_gate_edges()
 
-                        # A few missing gates at the end are tolerated; only
-                        # report when the wait failed or a lot is missing.
-                        if (not finished) or fill_ratio < 0.99:
+                        candidate = np.asarray(
+                            self._hardware.counter.get_gate_data()
+                        ).ravel()[:gates_per_point]
+
+                        if filled > best_fill:
+                            best_fill = filled
+                            best_cts = candidate
+
+                        if fill_ratio >= 0.99:
+                            break
+
+                        if attempt == gate_retry_num - 1:
+                            detail = self._hardware.counter.get_gate_diagnostics()
+                            overflow_now = detail["overflows"]
+                            if overflow_now >= 0 and overflows_before >= 0:
+                                overflow_delta = overflow_now - overflows_before
+                            else:
+                                overflow_delta = -1
                             print(
                                 f"[gate diag] time={time_point} point={point_idx} "
+                                f"attempts={len(attempt_fills)} fills={attempt_fills} "
                                 f"finished={finished} "
                                 f"filled={filled}/{expected} "
+                                f"edges={gate_edges} "
+                                f"last={detail['last_filled']} gaps={detail['gaps']} "
+                                f"overflow=+{overflow_delta} "
                                 f"running={running} "
+                                f"pulser={pulser_wait_s:.3f}s block~{point_duration_s:.3f}s "
                                 f"waited={wait_elapsed:.2f}s"
                             )
+
+                    if best_cts is not None:
+                        cts_arr = best_cts
+                        filled = best_fill
                     else:
-                        time.sleep(0.05)
-
-                    gate_data = np.asarray(self._hardware.counter.get_gate_data()).ravel()
-
-                    cts_arr = gate_data[:gates_per_point]
+                        gate_data = np.asarray(
+                            self._hardware.counter.get_gate_data()
+                        ).ravel()
+                        cts_arr = gate_data[:gates_per_point]
 
                     ref = int(np.sum(cts_arr[0::2]))
                     sig = int(np.sum(cts_arr[1::2]))
@@ -634,8 +721,14 @@ class SinglePointscanThread(QtCore.QThread):
 
                     self.data_update.emit(packet)
 
+                    # Missing gates scale sig and ref down together, so compare a
+                    # fill-ratio corrected ref with the tracking threshold.
+                    ref_for_track = ref
+                    if expected and filled:
+                        ref_for_track = int(round(ref * expected / filled))
+
                     keep_scanning = self._auto_track_if_needed_after_scan_point(
-                        ref, pulse_seq=self.pulse_seq_time
+                        ref_for_track, pulse_seq=self.pulse_seq_time
                     )
                     if not keep_scanning:
                         break
@@ -667,6 +760,11 @@ class SinglePointscanThread(QtCore.QThread):
             self._hardware.counter.stop_gate_measure()
         except Exception as e:
             print(f"counter.stop_gate_measure failed: {e}")
+
+        try:
+            self._hardware.counter.stop_gate_edge_monitor()
+        except Exception as e:
+            print(f"counter.stop_gate_edge_monitor failed: {e}")
 
         self.status_update.emit("Time scan with gate count mode finished")
 

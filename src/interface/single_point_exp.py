@@ -260,6 +260,16 @@ class mainGUI(QtWidgets.QMainWindow):
     def is_linear_time_scan(self):
         return self.ui.cBScanscale.currentText() == "Linear"
 
+    def _apply_scan_xscale(self, ax):
+        """
+        An exponential time sweep must be drawn on a log x axis.
+
+        Only the time scan uses the scan scale combo box; a frequency scan
+        stays linear.
+        """
+        use_log = self.is_time_scan() and not self.is_linear_time_scan()
+        ax.set_xscale("log" if use_log else "linear")
+
     def generate_scan_data_sweep_points(self):
         """
         generate the sweep points based on the histogram parameter
@@ -371,11 +381,12 @@ class mainGUI(QtWidgets.QMainWindow):
             label="Ref"
         )
 
-        # 7. 美化
+        # 7. style
         ax.set_xlabel(x_label)
         ax.set_ylabel("Count")
         ax.grid(True, alpha=0.3)
         ax.legend()
+        self._apply_scan_xscale(ax)
 
         canvas.draw_idle()
 
@@ -398,6 +409,7 @@ class mainGUI(QtWidgets.QMainWindow):
         self.ui.cBScanType.currentTextChanged.connect(self.scan_type_changed)
         self.ui.cBCountMode.currentTextChanged.connect(self.count_mode_changed)
         self.ui.cBMWMode.currentTextChanged.connect(self.mw_mode_changed)
+        self.ui.cBScanscale.currentTextChanged.connect(self.scan_scale_changed)
 
         # MW state Group
         self.ui.pbMWon.clicked.connect(self.mw_on)
@@ -507,6 +519,45 @@ class mainGUI(QtWidgets.QMainWindow):
 
     def mw_mode_changed(self,text):
         self.update_ui_by_mode()
+
+    def scan_scale_changed(self, text):
+        """
+        Switch the displayed time-scan plot between a linear and a log x axis.
+
+        The sweep points are regenerated before every scan in
+        configure_scan_thread_before_scan(), so here only the axis of the data
+        already on screen has to be updated.
+        """
+        if not self.is_time_scan():
+            return
+
+        if not self.is_linear_time_scan():
+            try:
+                start_time = int(self.ui.leTimestartscan.text())
+                end_time = int(self.ui.leTimeendscan.text())
+            except ValueError:
+                self.ui.statusbar.showMessage("Time scan needs numeric start/end.")
+                return
+            if start_time <= 0 or end_time <= 0:
+                self.ui.statusbar.showMessage(
+                    "Exponential time scan requires start and end time > 0 ns."
+                )
+                return
+
+        plot = getattr(self, "ScanSigPlot", None)
+        if plot is None:
+            return
+
+        ax = plot.axes
+        self._apply_scan_xscale(ax)
+
+        x = np.asarray(plot.get_xdata(), dtype=float)
+        sig = np.asarray(plot.get_ydata(), dtype=float)
+        ref = np.asarray(self.ScanRefPlot.get_ydata(), dtype=float)
+        self._autoscale_axis(ax, x, [sig, ref])
+        ax.figure.canvas.draw_idle()
+
+        self.ui.statusbar.showMessage(f"Time scan scale: {text}")
 
     def update_ui_by_mode(self):
         """
@@ -960,6 +1011,7 @@ class mainGUI(QtWidgets.QMainWindow):
         self.ScanRefPlot.set_data(x, ref_y)
 
         ax = self.ScanSigPlot.axes
+        self._apply_scan_xscale(ax)
         self._autoscale_axis(ax, x, [sig_y, ref_y])
         ax.figure.canvas.draw_idle()
 
@@ -983,7 +1035,15 @@ class mainGUI(QtWidgets.QMainWindow):
             x_min = float(np.min(finite_x))
             x_max = float(np.max(finite_x))
 
-            if x_min == x_max:
+            if ax.get_xscale() == "log":
+                # a log axis needs strictly positive limits
+                if x_max > 0:
+                    if x_min <= 0:
+                        x_min = x_max * 1e-6
+                    if x_min == x_max:
+                        x_min = x_max * 0.9
+                    ax.set_xlim(x_min, x_max * 1.05)
+            elif x_min == x_max:
                 margin = max(abs(x_min) * 1e-6, 1.0)
                 ax.set_xlim(x_min - margin, x_max + margin)
             else:
