@@ -132,3 +132,35 @@ def demo(out_dir):
                      title="demo ODMR (sig/ref)", xlabel="frequency (MHz)"),
     ]
     return files
+
+def render_track(pos_lists, cts_lists, origins, finals, path="track.png", title=""):
+    """Three panels: counts versus position for X, Y and Z."""
+    names = ["X", "Y", "Z"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.6))
+
+    for i, ax in enumerate(axes):
+        pos = np.asarray(pos_lists[i], dtype=float)
+        cts = np.asarray(cts_lists[i], dtype=float)
+
+        ax.plot(pos, cts, "o-", ms=4, lw=1.2, color="tab:blue")
+
+        ax.axvline(
+            float(origins[i]), color="tab:gray", ls="--", lw=1.0, label="origin"
+        )
+        ax.axvline(
+            float(finals[i]), color="tab:red", ls="-", lw=1.2, label="final"
+        )
+
+        ax.set_title(names[i])
+        ax.set_xlabel("%s position" % names[i])
+        ax.set_ylabel("counts")
+        ax.grid(True, alpha=STYLE["grid_alpha"])
+
+        if i == 0:
+            ax.legend(fontsize=8)
+
+    if title:
+        fig.suptitle(title, fontsize=11)
+
+    return _save(fig, path)

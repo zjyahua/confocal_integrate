@@ -38,6 +38,31 @@ python -m src.api.cli scan  --mode intensity --dwell-ms 0.05 --resolution 100 --
 python -m src.api.cli point --mode freq --start 2800 --end 2940 --step 1 \
                             --loops 10 --average 10000 --dry-run
 
+# 点测量只有三种组合（没有 freq + Histogram）
+python -m src.api.cli point --mode freq --count-mode Gate \
+    --sequence pulse_odmr/Pulse_ODMR_130ns.txt \
+    --start 2800 --end 2940 --step 1 --loops 10 --average 5000
+
+python -m src.api.cli point --mode time --count-mode Gate \
+    --sequence T1/T1_no_mw.txt \
+    --start 1 --end 5000 --points 100 --time-scale Exponential \
+    --loops 10 --average 5000
+
+python -m src.api.cli point --mode time --count-mode Histogram \
+    --sequence rabi/Rabi_130ns_histogram.txt \
+    --bin-width 100 --bin-num 1000 --loops 10 --average 5000
+
+# 点测量 + 自动追踪：ref 低于阈值时先跑一次 track 再继续
+python -m src.api.cli point --mode time --count-mode Gate \
+    --sequence T1/T1_no_mw.txt \
+    --start 1 --end 5000 --points 100 --time-scale Exponential \
+    --loops 10 --average 5000 \
+    --auto-track --track-threshold 3000 --track-mode galvo --track-step 0.0025
+
+# 自动找最亮点（会移动样品！laser_on 才开激光，结束后恢复）
+python -m src.api.cli track --mode galvo --step 0.0025 --integral-ms 200 --laser-on
+python -m src.api.cli track --mode stage --step 0.1 --integral-ms 200 --laser-on
+
 # 控制服务（UI 未开时可选；不开也能跑，CLI 会本地执行）
 python -m src.api.cli serve --port 8765
 
@@ -51,6 +76,24 @@ python -m src.api.cli demo --out experiments/demo
 ```
 
 `--json` 输出机器可读结果，便于 agent 解析。
+
+## 实时进度（live view）
+
+扫描运行期间，输出目录里会不断刷新两个文件：
+
+```
+live.png    当前的曲线 / 直方图 / 部分扫描图（每 --live-interval 秒重画，默认 2 s）
+live.json   { phase, loop, loop_num, point, point_num, elapsed_s, eta_s }
+```
+
+同时 stdout 每 `--live-interval` 秒打印一行：
+
+```
+[live] loop 2/4 point 16/40  elapsed 16.1s  eta 29.8s
+```
+
+`--live-interval 0` 关闭实时输出。agent 可以在扫描过程中读 `live.png` 贴图，
+也可以在结束时用 `status --job` / `--json` 看最终进度。
 
 ## 输出位置
 
@@ -130,6 +173,17 @@ def _call_on_gui_thread(self, fn):
 - ✅ `render`：扫描图、扫描曲线、直方图（无需 Qt）
 - ✅ `execute`：共聚焦**强度扫描**已接真机（`ConfocalScanThread` + `DataThread`，
   无需 Qt 窗口），输出 `raw.txt` / `image.png` / `summary.json`
+- ✅ `execute`：**点测量**已接真机，支持三种组合（`freq + Gate`、
+  `time + Gate`、`time + Histogram`），输出 `raw.txt` / `sweep.png` 或
+  `histogram.png` / `summary.json`（含峰位、均值、对比度）
 - ✅ `--z` 缺省时读取位移台当前位置，不会擅自移动 Z
-- ⏳ 时间扫描（FLIM）与点测量（ODMR / Rabi / T1）的执行器还没接
+- ✅ `execute`：**track** 已接真机（`MaxThread`，X/Y 用振镜或位移台、Z 用位移台），
+  输出 `track.png`（三轴曲线，标注起点/终点）/ `summary.json`（origin、final、峰值）
+- ✅ `track` 支持 `--laser-on`：运行期间打开激光，结束后恢复（不给就要求激光已开）
+- ✅ **实时进度**：点测量与共聚焦扫描运行期间每隔 `--live-interval` 秒刷新
+  `live.png` / `live.json`，并打印 `[live]` 进度行（含 ETA）
+- ✅ **点测量 + 自动追踪**：`--auto-track --track-threshold N`，ref 低于阈值时
+  在 headless 下直接跑 `MaxThread` 找点（相当于 GUI 的 track 窗口），
+  追踪记录写进 `summary.json` 的 `track_events`
+- ⏳ 时间扫描（FLIM）执行器还没接
 - ⏳ Qt 界面内嵌控制服务（参数回填 + 界面实时显示）还没接
